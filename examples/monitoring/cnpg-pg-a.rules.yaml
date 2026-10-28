@@ -1,0 +1,243 @@
+# Prometheus 原生规则文件；阈值为示例，集群及采集标签见运维文档。
+# 只有已经建立独立业务写探测、备份和灾备可恢复性探测时才可用于交付。
+groups:
+  - name: dba.cnpg-pg-a
+    interval: 30s
+    rules:
+      - alert: DbaPostgresObservedPrimaryCount
+        expr: |
+          (sum(cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == bool 0) or vector(0)) != 1
+        for: 1m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 监控观测到的主实例数不是一个
+          description: 检查采集链、Lease、实际写主和旧主隔离；此告警不等于独立的客户端写入探测。
+      - alert: DbaPostgresScrapeDown
+        expr: up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: PostgreSQL 实例指标抓取失败
+          description: 检查实例、网络和 Prometheus 发现；目标消失也需由集群级缺失告警覆盖。
+      - alert: DbaPostgresMetricsAbsent
+        expr: absent_over_time(cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"}[5m])
+        for: 1m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 整套数据库实例指标缺失
+          description: 检查采集链、数据库和网络，不把指标缺失当作数据库正常。
+      - alert: DbaPostgresNoSynchronousReplica
+        expr: cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} < 1
+        for: 1m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 主库没有可确认的同步备节点
+          description: 核对复制和提交等待；不得为消除告警擅自降级同步要求。
+      - alert: DbaPostgresSyncMetricAbsent
+        expr: absent_over_time(cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"}[5m])
+        for: 1m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 实际同步备节点指标缺失
+          description: 检查自定义查询、主库和采集链；无法确认同步备库时不能当作健康。
+      - alert: DbaPostgresReplicaLag
+        expr: |
+          (cnpg_pg_replication_lag{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} > 30)
+          and on(job,namespace,cluster,pod)
+          (cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == 1)
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 备库回放延迟超过 30 秒
+          description: 结合 WAL 字节差、网络、备库查询冲突及 Ceph 延迟排查。
+      - alert: DbaPostgresWalReceiverDown
+        expr: |
+          (cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == 1)
+          and on(job,namespace,cluster,pod)
+          (cnpg_pg_replication_is_wal_receiver_up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == 0)
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 备库流复制接收器持续不可用
+          description: 区分归档追赶、网络故障和 WAL 缺失，确认恢复后才能算消警。
+      - alert: DbaPostgresSlotLagHigh
+        expr: |
+          (cnpg_pg_replication_slots_pg_wal_lsn_diff{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} > 3221225472)
+          and on(job,namespace,cluster,pod)
+          (cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == 0)
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 主库复制槽保留距离超过 3 GiB
+          description: 示例对应 4GB 槽预算；先查槽所有者、消费进度和磁盘，再按运行手册处置。
+      - alert: DbaPostgresArchiveFailure
+        expr: |
+          cnpg_pg_stat_archiver_last_failed_time{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"}
+          > on(job,namespace,cluster,pod)
+          cnpg_pg_stat_archiver_last_archived_time{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"}
+        for: 5m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: WAL 最近一次归档失败且尚无后续成功
+          description: 检查插件、凭据、证书、对象存储和 WAL 磁盘；禁止删除未归档 WAL。
+      - alert: DbaPostgresArchiveBacklog
+        expr: |
+          (cnpg_collector_pg_wal_archive_status{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",value="ready"} >= 4)
+          and on(job,namespace,cluster,pod)
+          (cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == 0)
+        for: 10m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 主库待归档 WAL 段持续堆积
+          description: 核对归档吞吐和 WAL 增长，段数不直接代表固定字节数或灾备 RPO。
+      - alert: DbaPostgresPvcSpaceLow
+        expr: |
+          kubelet_volume_stats_available_bytes{namespace="dba-a"}
+          / kubelet_volume_stats_capacity_bytes{namespace="dba-a"} < 0.20
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 数据库 PVC 可用空间低于 20%
+          description: 核对实际挂载、WAL、数据增长和 Ceph 池容量；按批准流程扩容。
+      - alert: DbaPostgresPvcSpaceCritical
+        expr: |
+          kubelet_volume_stats_available_bytes{namespace="dba-a"}
+          / kubelet_volume_stats_capacity_bytes{namespace="dba-a"} < 0.10
+        for: 2m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 数据库 PVC 可用空间低于 10%
+          description: 控制写入增长并协调扩容，不能手工清理 WAL 或删除存储资源。
+      - alert: DbaPostgresPvcMetricsAbsent
+        expr: absent_over_time(kubelet_volume_stats_available_bytes{namespace="dba-a"}[10m])
+        for: 2m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 数据库 Namespace 的 PVC 空间指标全部缺失
+          description: 核对 CSI/kubelet 和采集；还需逐一检查每个活动 PVC 是否有指标。
+      - alert: DbaPostgresPvcPredictedFull
+        expr: |
+          (predict_linear(kubelet_volume_stats_available_bytes{namespace="dba-a"}[6h], 14400) < 0)
+          and
+          (kubelet_volume_stats_available_bytes{namespace="dba-a"}
+           / kubelet_volume_stats_capacity_bytes{namespace="dba-a"} < 0.40)
+        for: 15m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 数据库 PVC 按近期趋势可能在 4 小时内耗尽
+          description: 确认趋势、样本及扩容事件，结合绝对水位和 WAL 增长处置。
+      - alert: DbaPostgresBackupStale
+        expr: |
+          time() - max by(namespace,cluster) (
+            barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"}
+          ) > 93600
+        for: 5m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 最近一次基础备份缺失或超过 26 小时
+          description: 检查备份状态与对象；基础备份成功不代表 WAL、异地副本或 PITR 已验证。
+      - alert: DbaPostgresBackupMetricsAbsent
+        expr: absent_over_time(barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"}[10m])
+        for: 2m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: Barman 备份指标缺失
+          description: 检查插件、侧车、ObjectStore 和 Prometheus 采集，无法据此确认备份健康。
+  - name: dba.ceph-example
+    interval: 30s
+    rules:
+      - alert: DbaCephOsdWriteLatencyHigh
+        expr: |
+          (rate(ceph_osd_op_w_latency_sum{job="ceph-osd"}[5m])
+           / rate(ceph_osd_op_w_latency_count{job="ceph-osd"}[5m]) > 0.05)
+          and on(job,instance,ceph_daemon)
+          (rate(ceph_osd_op_w_latency_count{job="ceph-osd"}[5m]) > 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Ceph OSD 平均写入延迟超过 50 毫秒
+          description: 该值是 OSD 平均而非数据库 P99；结合重平衡、磁盘、网络和提交延迟判断。
+      - alert: DbaCephOsdDown
+        expr: ceph_osd_up{job="ceph-cluster"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Ceph OSD 已停止
+          description: 检查 HEALTH、PG 状态、恢复余量和数据库可写性，不降低 min_size。
+      - alert: DbaCephClusterMetricsAbsent
+        expr: absent_over_time(ceph_osd_up{job="ceph-cluster"}[5m])
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Ceph 集群 OSD 状态指标缺失
+          description: 检查 Ceph 管理器和采集链；指标缺失不能当作 OSD 健康。
+      - alert: DbaCephOsdPerformanceMetricsAbsent
+        expr: absent_over_time(ceph_osd_op_w_latency_count{job="ceph-osd"}[10m])
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Ceph OSD 性能指标缺失
+          description: 核对 ceph-exporter 和抓取目标；缺少指标时无法评估 OSD 写入延迟。
+  - name: dba.cnpg-operator
+    interval: 30s
+    rules:
+      - alert: DbaCnpgOperatorUnavailable
+        expr: kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="cnpg-system",deployment="cnpg-controller-manager"} < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: CNPG Operator 没有可用副本
+          description: 检查控制面、Operator 和 Lease；数据库是否可写需另行探测。
+      - alert: DbaCnpgOperatorDegraded
+        expr: kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="cnpg-system",deployment="cnpg-controller-manager"} < 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: CNPG Operator 少于两副本可用
+          description: 检查调度、节点资源及当前 leader，副本 Ready 不等于 leader 正常。
+      - alert: DbaCnpgOperatorMetricsAbsent
+        expr: absent_over_time(kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="cnpg-system",deployment="cnpg-controller-manager"}[5m])
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Operator Deployment 状态指标缺失
+          description: 检查 kube-state-metrics、采集与 Deployment 是否存在。

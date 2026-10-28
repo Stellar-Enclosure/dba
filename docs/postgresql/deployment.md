@@ -18,7 +18,7 @@
 | 组件版本 | Kubernetes、CloudNativePG Operator/CRD、`kubectl cnpg`、PostgreSQL/CNPG 镜像、Barman 插件、cert-manager、Ceph/CSI、客户端和扩展的兼容矩阵 |
 | 物料 | 固定版本的 Operator 和插件清单或 Chart、镜像 digest、CA、内部镜像仓库和离线恢复副本；核对来源、摘要和发行说明；管理端具备 kubectl、jq 和受控的 PostgreSQL 客户端 |
 | 故障域 | 至少三个符合反亲和的节点；若要求单节点故障后重建至三实例，则至少四个；物理宿主机、存储、网络和供电映射按目标验收 |
-| 资源 | 每实例 CPU/内存/连接数、数据和 WAL 高峰、PVC 容量、Ceph 池/物理余量、备份/恢复额外资源及故障后容量 |
+| 资源 | 每实例 CPU/内存/连接数、数据和 WAL 高峰、槽/归档预算、PVC 容量、Ceph 池/物理余量、备份/恢复额外资源及故障后容量；见[运维手册](operations.md#3-wal复制槽与容量) |
 | 存储 | 已验收的 RBD StorageClass、`Retain`、扩容、CSI 节点覆盖、卷独占与旧写入者隔离；不得创建第二套竞争同一设备的 CSI |
 | 安全和网络 | 最小权限账号、密钥交付与轮换、客户端证书 DNS、Operator/插件证书、访问路径及网络策略正反向测试 |
 | 备份 | 独立故障域对象存储、唯一空前缀、TLS CA、受限写身份、恢复只读身份、保留周期和恢复环境 |
@@ -112,8 +112,19 @@ k get crd objectstores.barmancloud.cnpg.io
 
 只在确认 Namespace 不存在时新建；先应用平台的 PSA、ResourceQuota、LimitRange、RBAC 和网络策略。测试时必须允许第 7.3 节列出的实际连接路径，同时验证未授权访问被拒绝。节点上所需的 CSI 和镜像已由平台交付。
 
+[配额示例](../../examples/namespace/pg-a-quota.yaml)、[网络策略示例](../../examples/network/pg-a-networkpolicy.yaml)和[监控查询示例](../../examples/monitoring/cnpg-pg-a.custom-queries.yaml)须先在受控目录替换集群/Namespace、实际标签、API 与对象存储 CIDR。配额必须容纳三个 PostgreSQL 实例、初始化/重建 Job、插件 sidecar、并发备份和恢复目标；LimitRange 的默认限制可能导致 sidecar OOM 或限速，不能照搬示例值。`requests.storage` 是 PVC 逻辑申请上限，不是 Ceph 原始容量预留。
+
 ```bash
 k create namespace "$NS"
+export QUOTA_FILE='<受控目录中的已核验配额文件>'
+export NETWORK_FILE='<受控目录中的已核验网络策略文件>'
+k create --dry-run=server --validate=strict -f "$QUOTA_FILE"
+k create -f "$QUOTA_FILE"
+k create --dry-run=server --validate=strict -f "$NETWORK_FILE"
+k create -f "$NETWORK_FILE"
+export MONITORING_QUERIES_FILE='<受控目录中的已核验监控查询文件>'
+k create --dry-run=server --validate=strict -f "$MONITORING_QUERIES_FILE"
+k create -f "$MONITORING_QUERIES_FILE"
 k -n "$NS" get resourcequota,limitrange,networkpolicy
 ```
 
@@ -165,8 +176,10 @@ spec:
         key: ACCESS_SECRET_KEY
     wal:
       compression: gzip
+      maxParallel: 1
     data:
       compression: gzip
+      jobs: 1
 ```
 
 ```bash
@@ -176,11 +189,11 @@ k create -f "$OBJECTSTORE_FILE"
 k -n "$NS" get objectstore pg-a-backup
 ```
 
-确认目标存储及授权路径属于独立故障域。S3 兼容实现的 multipart、对象列举、删除、TLS 和插件恢复能力需按锁定版本实测；只看到 ObjectStore 已创建不代表备份已成功。
+确认目标存储及授权路径属于独立故障域。示例限制 `data.jobs` 和 `wal.maxParallel` 为 1；前者控制单次基础备份上传并行数，后者控制 WAL 归档/恢复并行数，均不是跨集群的全局并发限制，需按恢复时间与 Ceph/对象存储负载压测。S3 兼容实现的 multipart、对象列举、删除、TLS 和插件恢复能力需按锁定版本实测；只看到 ObjectStore 已创建不代表备份已成功。
 
 ## 5. 创建一主两备集群
 
-将以下示例保存为 `cluster.yaml`。替换 Namespace、集群名、已核验镜像、StorageClass、节点标签和资源值。示例 20 GiB、2 GiB 内存请求等只是占位，需依据第 1 节容量交接重新测算。`kubernetes.io/hostname` 仅表示节点域；若要求物理宿主域，替换为平台交接并核验过的标签。
+将以下示例保存为 `cluster.yaml`。替换 Namespace、集群名、已核验镜像、StorageClass、节点标签和资源值。示例 20 GiB、2 GiB 内存请求、4GB 槽保留等只是占位，需依据第 1 节容量交接重新测算。槽上限只在 checkpoint 约束复制槽保留，不能限制归档失败产生的 WAL；达到上限可能使槽失效并需要恢复或重建备库。`kubernetes.io/hostname` 仅表示节点域；若要求物理宿主域，替换为平台交接并核验过的标签。
 
 使用 `imageName` 时必须同时保留以 PostgreSQL 主版本号开头的有效 tag 和已核验 digest，格式为 `仓库/镜像:18.6-system-trixie@sha256:64位十六进制摘要`；仅写 `镜像@sha256:...` 不能提供 CNPG 所需的版本信息，`latest` 也不可用。下例两个尖括号均为待替换值；tag 必须与 digest 的真实 PostgreSQL 版本一致并完成供应链核对。也可改用明确声明 `major: 18` 的受管 `ImageCatalog`，但不可同时配置 `imageName` 和 `imageCatalogRef`。[CNPG 镜像要求](https://cloudnative-pg.io/docs/1.30/container_images/)
 
@@ -225,6 +238,7 @@ spec:
       fsync: 'on'
       full_page_writes: 'on'
       archive_timeout: 5min
+      max_slot_wal_keep_size: 4GB
     synchronous:
       method: any
       number: 1
@@ -235,6 +249,15 @@ spec:
       - hostssl app app all scram-sha-256
       - hostssl app app_readonly all scram-sha-256
       - hostssl all all all reject
+  replicationSlots:
+    highAvailability:
+      enabled: true
+  monitoring:
+    customQueriesConfigMap:
+      - name: pg-a-monitoring
+        key: queries
+    tls:
+      enabled: true
   storage:
     storageClass: <VERIFIED_RBD_RETAIN_STORAGECLASS>
     size: 20Gi
@@ -257,7 +280,7 @@ spec:
         barmanObjectName: pg-a-backup
 ```
 
-用户定义 HBA 规则位于 CNPG 固定的本地/复制/连接池规则之后、默认规则之前。示例允许 `app` 和 `app_readonly` 角色经 TLS 访问 `app` 数据库；增加业务角色、监控身份或连接池时必须先调整并验证规则。`app` 是初始化的数据库 owner，不应作为生产只读账号；生产写账号也应按业务对象单独授权。`hostssl ... all` 不限制网络来源，仍须由经验证的网络策略和授权来源限制访问。示例设置 `smartShutdownTimeout: 0` 缩小探测触发后的旧连接窗口，但不构成外部 fencing。
+用户定义 HBA 规则位于 CNPG 固定的本地/复制/连接池规则之后、默认规则之前。示例允许 `app` 和 `app_readonly` 角色经 TLS 访问 `app` 数据库；增加业务角色、监控身份或连接池时必须先调整并验证规则。`app` 是初始化的数据库 owner，不应作为生产只读账号；生产写账号也应按业务对象单独授权。`hostssl ... all` 不限制网络来源，仍须由经验证的网络策略和授权来源限制访问。示例设置 `smartShutdownTimeout: 0` 缩小探测触发后的旧连接窗口，但不构成外部 fencing。启用 metrics TLS 须同步交付可信 CA 与采集配置；修改已有集群的该开关会触发滚动更新。`customQueriesConfigMap` 引用[监控查询示例](../../examples/monitoring/cnpg-pg-a.custom-queries.yaml)，该能力在参考版本为 beta，须验证查询权限、性能和指标缺失告警。[CNPG 监控](https://cloudnative-pg.io/docs/1.30/monitoring/)
 
 ```bash
 export CLUSTER_FILE='<受控目录中的 cluster.yaml>'
@@ -345,10 +368,11 @@ GRANT SELECT ON TABLE <APPROVED_SCHEMA>.<APPROVED_TABLE_OR_VIEW> TO app_readonly
 | --- | --- | --- |
 | 第 2 节环境变量 | `NS=dba-a`、`CLUSTER=pg-a` | `NS=dba-b`、`CLUSTER=pg-b`；不可沿用第 2 节中的第一套赋值 |
 | ObjectStore 元数据、Cluster 插件引用及查询命令 | `dba-a`、`pg-a-backup` | `dba-b`、`pg-b-backup`；更换对象存储空前缀及身份 |
+| 监控查询 ConfigMap、Cluster 引用 | `pg-a-monitoring` | `pg-b-monitoring`；保持查询与告警规则引用一致 |
 | Cluster、Backup、ScheduledBackup 的 Namespace、名称和集群引用 | `dba-a` / `pg-a` / `pg-a-first-backup` / `pg-a-daily` | `dba-b` / `pg-b` / `pg-b-first-backup` / `pg-b-daily`，同时替换后续 `wait` 和 `describe` 中的备份名 |
 | 恢复来源 | `serverName: pg-a` 及第一套的独立备份路径 | `serverName: pg-b` 及第二套的独立备份路径；恢复 Namespace/目标名也要独立 |
 
-Secret 名可相同但必须在各自 Namespace 重新创建，内容和授权须独立。所有清单及对应命令同步替换后再做 server dry-run；禁止将第一套 PVC、凭据或归档前缀作为第二套初始化输入。每套都需要独立的 Service/TLS、容量、备份与恢复验证，不能仅凭第一套成功标记全部成功。
+Secret 名可相同但必须在各自 Namespace 重新创建，内容和授权须独立。可使用[轻量 Kustomize 覆盖示例](operations.md#9-多集群覆盖和实施顺序)渲染 Cluster，其余 ObjectStore、备份计划、配额、NetworkPolicy、告警选择器及对应命令也须逐项同步替换后做 server dry-run；禁止将第一套 PVC、凭据或归档前缀作为第二套初始化输入。每套都需要独立的 Service/TLS、容量、备份与恢复验证，不能仅凭第一套成功标记全部成功。
 
 ## 7. 备份、恢复与持续运维
 
@@ -543,7 +567,7 @@ r -n "$RESTORE_NS" exec "$RESTORE_PRIMARY" -c postgres -- psql -X -U postgres -d
 
 ### 7.3 网络、安全与监控验收
 
-依据锁定版本和实际服务端口生成最小访问清单：应用与实例 TCP 5432；实例复制 TCP 5432；Operator 到实例管理器 TCP 8000；监控到实例 TCP 9187；API server 到 Operator webhook TCP 9443；Operator、实例及插件到 Kubernetes API、DNS、插件服务和 HTTPS 对象存储。插件服务端口、节点到 Ceph MON/OSD、监控方式和 API 出入口以交接配置为准。
+依据锁定版本和实际服务端口生成最小访问清单：应用与实例 TCP 5432；同集群实例和 Job 双向 TCP 5432/8000；Operator 到实例 TCP 5432/8000；监控到实例 TCP 9187；API server 到 Operator webhook TCP 9443；Operator、实例及插件到 Kubernetes API、DNS、插件服务和 HTTPS 对象存储。具体源与目标见[通信矩阵及 NetworkPolicy](operations.md#2-网络与最小权限)。插件服务端口、节点到 Ceph MON/OSD、监控方式和 API 出入口以交接配置为准。
 
 逐一验证允许和拒绝，特别确认默认拒绝策略没有阻断 Operator 状态访问、Lease 更新、插件 WAL 上传或证书续期。为每套集群配置写主可用性、同步备节点数、复制延迟、卷和 WAL 水位、归档/备份失败、独立副本可恢复点、证书到期与 Ceph 健康告警；通过真实故障或受控探针验证通知到达值班接收方。
 
@@ -641,4 +665,4 @@ PostgreSQL 小版本逐套升级，先验证备份、镜像、扩展、主备、
 | 主备故障 | 连续已确认事务清单、旧主隔离、候选完整性、端点变化、客户端重连、恢复时间和分区/复合故障边界 |
 | 运行交接 | 版本/digest、配置归属、密钥恢复路径、告警送达、维护流程、未通过项目及责任人 |
 
-未做的故障注入、跨故障域恢复或生产验证标记为未通过/未执行，不能以静态 YAML 校验或历史实验结果替代。各环境先完成交接和验收，才允许业务迁入。
+逐场景的执行、观察、数据核对与恢复标准见[生产验收与故障演练](acceptance.md)。未做的故障注入、跨故障域恢复或生产验证标记为未通过/未执行，不能以静态 YAML 校验或历史实验结果替代。各环境先完成交接和验收，才允许业务迁入。

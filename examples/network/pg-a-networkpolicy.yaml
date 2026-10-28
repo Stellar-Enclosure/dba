@@ -1,0 +1,103 @@
+# 示例：替换 Namespace、集群名、客户端标签及文档地址后再部署。
+# 192.0.2.10 和 198.51.100.20 是文档示例地址，不是实际 API 或对象存储。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pg-a-isolation
+  namespace: dba-a
+spec:
+  # CNPG 1.30.1 的实例和 bootstrap/recovery Job 均带这三个标签。
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: pg-a
+      app.kubernetes.io/name: postgresql
+      app.kubernetes.io/component: database
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # 集群内部复制、状态/隔离探测；不匹配同 Namespace 的其他集群。
+    - from:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: pg-a
+              app.kubernetes.io/name: postgresql
+              app.kubernetes.io/component: database
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+    # CNPG 1.30.1 Operator 的状态查询和数据库管理。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudnative-pg
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+    # 已批准的业务客户端；标签须由平台和业务共同约束。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: apps-a
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: application-a
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Prometheus 实例指标端口；请按实际部署替换标签。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9187
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: pg-a
+              app.kubernetes.io/name: postgresql
+              app.kubernetes.io/component: database
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 例示 API 真实目标地址及端口；按 CNI 的 NAT 策略核定。
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 6443
+    # 例示独立对象存储实际地址；随 DNS/负载均衡变更维护。
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.20/32
+      ports:
+        - protocol: TCP
+          port: 443

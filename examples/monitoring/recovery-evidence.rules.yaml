@@ -1,0 +1,63 @@
+# 这些 dba_* 指标不是 CNPG、Barman 或 Ceph 内置指标。
+# 仅在现有监控接入经过验证的独立恢复证据后加载；缺失会触发告警。
+groups:
+  - name: dba.recovery-evidence-pg-a
+    interval: 30s
+    rules:
+      - alert: DbaDrRecoveryPointStale
+        expr: |
+          time() - dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"} > 900
+        for: 2m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 独立站点已验证恢复点落后超过 15 分钟
+          description: 检查完整基础备份、连续 WAL、时间线和异地复制；不能将最近基础备份时间代替恢复点。
+      - alert: DbaDrRecoveryPointMissing
+        expr: absent_over_time(dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}[15m])
+        for: 2m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: 独立站点恢复点证据缺失
+          description: 核对证据采集和恢复链；没有数据时不能报告灾备健康。
+      - alert: DbaPitrExerciseStale
+        expr: |
+          time() - dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"} > 2678400
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: PITR 成功演练超过 31 天
+          description: 安排隔离恢复并验证目标前后数据；只在实际恢复和数据核对通过后更新证据。
+      - alert: DbaDrExerciseStale
+        expr: |
+          time() - dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"} > 8640000
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 跨站完整恢复演练超过 100 天
+          description: 在独立故障域执行完整恢复与数据核对，记录实际 RPO 和 RTO。
+      - alert: DbaPitrEvidenceMissing
+        expr: absent_over_time(dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"}[1h])
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: PITR 演练证据指标缺失
+          description: 核对演练和证据采集；缺失不能视为演练通过。
+      - alert: DbaDrExerciseEvidenceMissing
+        expr: absent_over_time(dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}[1h])
+        for: 5m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: 跨站恢复演练证据指标缺失
+          description: 核对跨站演练和证据采集；缺失不能视为灾备通过。

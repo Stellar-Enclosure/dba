@@ -1,0 +1,22 @@
+# CNPG 1.30.1 用户自定义查询为 beta；仅在隔离环境验证后使用。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pg-a-monitoring
+  namespace: dba-a
+  labels:
+    cnpg.io/reload: 'true'
+data:
+  queries: |
+    dba_sync:
+      primary: true
+      target_databases:
+        - postgres
+      query: |
+        SELECT pg_catalog.count(*) AS eligible_replicas
+        FROM pg_catalog.pg_stat_replication
+        WHERE state = 'streaming' AND sync_state IN ('sync', 'quorum')
+      metrics:
+        - eligible_replicas:
+            usage: GAUGE
+            description: "主库上 streaming 且处于 sync/quorum 状态的备节点数量"

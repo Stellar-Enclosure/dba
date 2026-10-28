@@ -1,0 +1,30 @@
+# Prometheus scrape_configs 片段；合并到现有 Prometheus 配置，不单独部署 Prometheus。
+# 必须启用 Cluster 的 monitoring.tls.enabled，并将经核验的公开 CA 证书挂载到 ca_file。
+scrape_configs:
+  - job_name: cnpg-postgres
+    scrape_interval: 30s
+    scheme: https
+    tls_config:
+      ca_file: /etc/prometheus/ca/pg-a-ca.crt
+      server_name: pg-a-rw
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - dba-a
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+        action: keep
+        regex: pg-a
+      - source_labels: [__meta_kubernetes_pod_label_cnpg_io_podRole]
+        action: keep
+        regex: instance
+      - source_labels: [__meta_kubernetes_pod_container_name, __meta_kubernetes_pod_container_port_name]
+        action: keep
+        regex: postgres;metrics
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+        target_label: cluster

@@ -1,0 +1,11 @@
+# 只保护通过 eviction API 发起的自愿驱逐；不能替代 Operator 反亲和或故障验收。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cnpg-controller-manager
+  namespace: cnpg-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-pg

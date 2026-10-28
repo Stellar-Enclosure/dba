@@ -6,7 +6,7 @@
 | 适用范围 | Kubernetes 中多套独立的 PostgreSQL 单主多备集群 |
 | 方案依据 | [已审核方案](../../proposals/postgresql-kubernetes-ceph.md) |
 | 状态 | 设计与实施基线；目标环境、版本、容量和故障演练待交接 |
-| 关联文档 | [部署、验收与故障处置](deployment.md) |
+| 关联文档 | [部署](deployment.md)、[生产运维](operations.md)、[验收与故障演练](acceptance.md) |
 
 ## 1. 目标与原则
 
@@ -141,7 +141,7 @@ Barman Cloud Plugin 负责基础备份与持续 WAL 归档。建议每日一次�
 
 业务身份、备份身份、监控身份和平台管理身份分离。数据卷和备份对象按平台能力加密；凭据与密钥存放于受控 Secret/外部密钥系统，不提交到公开仓库。应用连接要求 `sslmode=verify-full`、可信 CA 和匹配 Service DNS 的证书；通过 HBA、网络策略及实际负向测试拒绝明文和未授权来源。普通业务不使用超级用户，Operator 所需内置身份由其管理。
 
-最小网络路径包括：应用到数据库 TCP 5432、实例之间复制 TCP 5432、Operator 到实例管理器 TCP 8000、监控到实例 TCP 9187、API server 到 Operator admission webhook TCP 9443、Operator/实例到 Kubernetes API、DNS、Barman 插件服务及对象存储 HTTPS。端口和实际流向以锁定版本与部署清单为准；CSI 节点到 Ceph 的流量由平台网络负责。默认拒绝策略必须覆盖允许和拒绝的双向实测，不能为了连通性放开整个 Namespace。[CNPG 安全与端口](https://cloudnative-pg.io/docs/1.30/security/)
+最小网络路径包括：应用到数据库 TCP 5432、同集群实例和初始化/恢复 Job 之间 TCP 5432/8000、Operator 到实例 TCP 5432/8000、监控到实例 TCP 9187、API server 到 Operator admission webhook TCP 9443、Operator/实例到 Kubernetes API、DNS、Barman 插件服务及对象存储 HTTPS。端口和实际流向以锁定版本与部署清单为准；CSI 节点到 Ceph 的流量由平台网络负责。默认拒绝策略必须覆盖允许和拒绝的双向实测，不能为了连通性放开整个 Namespace。[通信矩阵和示例](operations.md#2-网络与最小权限)、[CNPG 安全与端口](https://cloudnative-pg.io/docs/1.30/security/)
 
 | 信号 | 初始处理建议；阈值需要压测和业务确认 |
 | --- | --- |
