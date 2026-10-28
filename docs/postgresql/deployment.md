@@ -42,7 +42,8 @@ export NS='dba-a'
 export CLUSTER='pg-a'
 export CNPG_NS='cnpg-system'
 
-test -n "$KUBE_CONTEXT" && test -n "$EXPECTED_KUBE_SYSTEM_UID"
+test -n "$KUBE_CONTEXT"
+test -n "$EXPECTED_KUBE_SYSTEM_UID"
 k() { kubectl --context "$KUBE_CONTEXT" "$@"; }
 kubectl config get-contexts "$KUBE_CONTEXT"
 k version
@@ -75,18 +76,22 @@ ceph osd pool ls detail
 
 由平台负责人先判断是**接入现有兼容 Operator**还是**首次安装**。若已存在，不执行下面的首次安装命令；按现有管理方式确认版本、监听范围、CRD、Webhook、Lease 权限、镜像和升级边界。本示例不指导覆盖或升级现有 Operator。
 
-首次安装时，从 [CNPG 发行清单](https://cloudnative-pg.io/docs/1.30/installation_upgrade/)取得与选定版本匹配的完整清单，保存到受控目录；核对发布源、摘要、镜像架构和 digest，并检查 Namespace、RBAC、CRD、Webhook、`coordination.k8s.io/leases` 权限以及镜像引用。变量应指向已审核的**本地完整清单**，不是未经校验的远程 URL。
+首次安装时，从 [CNPG 发行清单](https://cloudnative-pg.io/docs/1.30/installation_upgrade/)取得与选定版本匹配的完整清单，保存到受控目录；核对发布源、摘要、镜像架构和 digest，并检查 Namespace、RBAC、CRD、Webhook、`coordination.k8s.io/leases` 权限以及镜像引用。变量应指向已审核的**本地完整清单**，不是未经校验的远程 URL。确认清单中的 Namespace 与 `CNPG_NS` 一致，且该 Namespace 及其余清单资源均不存在。
+
+CNPG 1.30.1 的官方完整清单包含 Namespace。整份清单的 server dry-run 不会持久化 Namespace，因此后续的命名空间资源可能校验失败；若先创建 Namespace 再对整份清单使用 `create`，又会发生 `AlreadyExists`。以下流程只适用于本次首次创建的专用 Namespace：先创建它，再对完整清单做 server-side apply；该 apply 会按已审核清单管理此 Namespace 的元数据。**如 Namespace 或其他组件已存在，停止并走接入或升级流程，不得用本流程覆盖。**
 
 ```bash
 export CNPG_MANIFEST='<受控目录中的 CNPG 清单>'
 test -r "$CNPG_MANIFEST"
-k create --dry-run=server -f "$CNPG_MANIFEST"
-k create -f "$CNPG_MANIFEST"
+k create namespace "$CNPG_NS" --dry-run=server
+k create namespace "$CNPG_NS"
+k apply --server-side --dry-run=server -f "$CNPG_MANIFEST"
+k apply --server-side -f "$CNPG_MANIFEST"
 k -n "$CNPG_NS" rollout status deployment/cnpg-controller-manager --timeout=5m
-k get crd clusters.postgresql.cnpg.io backups.postgresql.cnpg.io scheduledbackups.postgresql.cnpg.io
+k get crd clusters.postgresql.cnpg.io backups.postgresql.cnpg.io scheduledbackups.postgresql.cnpg.io failoverquorums.postgresql.cnpg.io
 ```
 
-仅在全部相关资源确认不存在时使用 `create`；安装中途失败时先核对已创建对象的归属和状态，不能整组重跑或删除共享资源。若安装清单包含当前不存在的 Namespace，server dry-run 不会持久化 Namespace，依赖它的资源可能报错；先由平台按清单创建/确认 Namespace，再重新校验。共享 Operator 的变更会影响多套数据库，升级和回退需独立评估。
+server-side apply 可能更新已存在的同名资源，因而必须先核对除本次新建 Namespace 外的每个清单对象均不存在；不得使用 `--force-conflicts`。若权限、准入或字段管理冲突导致失败，先核对已创建对象的归属和状态，不能盲目重跑或删除共享资源。共享 Operator 的变更会影响多套数据库，升级和回退需独立评估。
 
 ### 3.2 Barman Cloud Plugin
 
@@ -112,16 +117,24 @@ k create namespace "$NS"
 k -n "$NS" get resourcequota,limitrange,networkpolicy
 ```
 
-凭据文件由安全交接产生，保存在受限目录。下面的 `APP_PASSWORD_FILE` 是无尾随换行的密码字节文件，S3 身份文件亦不得含意外换行；密钥内容不要作为命令行参数、写入终端输出或提交 Git。`backup-s3-ca.pem` 为目标服务的可信 CA，不是私钥。确认 Secret 名不存在后创建，后续轮换使用单独的轮换流程。
+凭据文件由安全交接产生，保存在受限目录。下面的 `APP_PASSWORD_FILE` 和 `READONLY_PASSWORD_FILE` 是无尾随换行的独立密码字节文件，S3 身份文件亦不得含意外换行；密钥内容不要作为命令行参数、写入终端输出或提交 Git。`backup-s3-ca.pem` 为目标服务的可信 CA，不是私钥。确认 Secret 名不存在后创建，后续轮换使用单独的轮换流程。
 
 ```bash
 export APP_PASSWORD_FILE='<仓库外应用密码文件>'
+export READONLY_PASSWORD_FILE='<仓库外只读账号密码文件>'
 export S3_ACCESS_KEY_FILE='<仓库外 S3 access key 文件>'
 export S3_SECRET_KEY_FILE='<仓库外 S3 secret key 文件>'
 export S3_CA_FILE='<仓库外 S3 服务 CA 文件>'
-test -s "$APP_PASSWORD_FILE" && test -s "$S3_ACCESS_KEY_FILE" && test -s "$S3_SECRET_KEY_FILE" && test -s "$S3_CA_FILE"
+test -s "$APP_PASSWORD_FILE"
+test -s "$READONLY_PASSWORD_FILE"
+test -s "$S3_ACCESS_KEY_FILE"
+test -s "$S3_SECRET_KEY_FILE"
+test -s "$S3_CA_FILE"
 k -n "$NS" create secret generic pg-app-auth --type=kubernetes.io/basic-auth \
   --from-literal=username=app --from-file=password="$APP_PASSWORD_FILE"
+k -n "$NS" create secret generic pg-readonly-auth --type=kubernetes.io/basic-auth \
+  --from-literal=username=app_readonly --from-file=password="$READONLY_PASSWORD_FILE"
+k -n "$NS" label secret pg-readonly-auth cnpg.io/reload=true
 k -n "$NS" create secret generic backup-s3-credentials \
   --from-file=ACCESS_KEY_ID="$S3_ACCESS_KEY_FILE" --from-file=ACCESS_SECRET_KEY="$S3_SECRET_KEY_FILE"
 k -n "$NS" create secret generic backup-s3-ca --from-file=ca.crt="$S3_CA_FILE"
@@ -167,7 +180,9 @@ k -n "$NS" get objectstore pg-a-backup
 
 ## 5. 创建一主两备集群
 
-将以下示例保存为 `cluster.yaml`。替换 Namespace、集群名、已核验镜像 digest、StorageClass、节点标签和资源值。示例 20 GiB、2 GiB 内存请求等只是占位，需依据第 1 节容量交接重新测算。`kubernetes.io/hostname` 仅表示节点域；若要求物理宿主域，替换为平台交接并核验过的标签。
+将以下示例保存为 `cluster.yaml`。替换 Namespace、集群名、已核验镜像、StorageClass、节点标签和资源值。示例 20 GiB、2 GiB 内存请求等只是占位，需依据第 1 节容量交接重新测算。`kubernetes.io/hostname` 仅表示节点域；若要求物理宿主域，替换为平台交接并核验过的标签。
+
+使用 `imageName` 时必须同时保留以 PostgreSQL 主版本号开头的有效 tag 和已核验 digest，格式为 `仓库/镜像:18.6-system-trixie@sha256:64位十六进制摘要`；仅写 `镜像@sha256:...` 不能提供 CNPG 所需的版本信息，`latest` 也不可用。下例两个尖括号均为待替换值；tag 必须与 digest 的真实 PostgreSQL 版本一致并完成供应链核对。也可改用明确声明 `major: 18` 的受管 `ImageCatalog`，但不可同时配置 `imageName` 和 `imageCatalogRef`。[CNPG 镜像要求](https://cloudnative-pg.io/docs/1.30/container_images/)
 
 ```yaml
 apiVersion: postgresql.cnpg.io/v1
@@ -177,19 +192,38 @@ metadata:
   namespace: dba-a
 spec:
   instances: 3
-  imageName: <CNPG_POSTGRESQL_18_IMAGE_BY_DIGEST>
+  imageName: '<IMAGE_REPOSITORY>:18.6-system-trixie@sha256:<64_HEX_DIGEST>'
   enableSuperuserAccess: false
   primaryUpdateStrategy: supervised
   smartShutdownTimeout: 0
+  probes:
+    liveness:
+      isolationCheck:
+        enabled: true
   bootstrap:
     initdb:
       database: app
       owner: app
       secret:
         name: pg-app-auth
+  managed:
+    roles:
+      - name: app_readonly
+        ensure: present
+        login: true
+        superuser: false
+        createdb: false
+        createrole: false
+        replication: false
+        inherit: false
+        inRoles: []
+        passwordSecret:
+          name: pg-readonly-auth
   postgresql:
     parameters:
       synchronous_commit: 'on'
+      fsync: 'on'
+      full_page_writes: 'on'
       archive_timeout: 5min
     synchronous:
       method: any
@@ -199,6 +233,7 @@ spec:
     pg_hba:
       - hostnossl all all all reject
       - hostssl app app all scram-sha-256
+      - hostssl app app_readonly all scram-sha-256
       - hostssl all all all reject
   storage:
     storageClass: <VERIFIED_RBD_RETAIN_STORAGECLASS>
@@ -222,16 +257,17 @@ spec:
         barmanObjectName: pg-a-backup
 ```
 
-用户定义 HBA 规则位于 CNPG 固定的本地/复制/连接池规则之后、默认规则之前。示例只允许 `app` 角色经 TLS 访问 `app` 数据库；增加业务角色、监控身份或连接池时必须先调整并验证规则。`hostssl ... all` 不限制网络来源，仍须由经验证的网络策略和授权来源限制访问。示例设置 `smartShutdownTimeout: 0` 缩小探测触发后的旧连接窗口，但不构成外部 fencing。
+用户定义 HBA 规则位于 CNPG 固定的本地/复制/连接池规则之后、默认规则之前。示例允许 `app` 和 `app_readonly` 角色经 TLS 访问 `app` 数据库；增加业务角色、监控身份或连接池时必须先调整并验证规则。`app` 是初始化的数据库 owner，不应作为生产只读账号；生产写账号也应按业务对象单独授权。`hostssl ... all` 不限制网络来源，仍须由经验证的网络策略和授权来源限制访问。示例设置 `smartShutdownTimeout: 0` 缩小探测触发后的旧连接窗口，但不构成外部 fencing。
 
 ```bash
 export CLUSTER_FILE='<受控目录中的 cluster.yaml>'
 k create --dry-run=server --validate=strict -f "$CLUSTER_FILE"
 k create -f "$CLUSTER_FILE"
-k -n "$NS" get cluster "$CLUSTER" -w
+k -n "$NS" wait --for=jsonpath='{.status.readyInstances}'=3 "cluster/$CLUSTER" --timeout=30m
+k -n "$NS" get cluster "$CLUSTER" -o wide
 ```
 
-上述 `-w` 是操作者在实施时主动运行的观察命令，满足条件后自行退出。等待三实例 Ready，检查事件和实际 Pod 分布；Pending 时先检查资源、拓扑、CSI、镜像和证书，禁止自动放宽反亲和或删除 PVC。
+等待三实例 Ready，检查事件和实际 Pod 分布；超时或 Pending 时先检查资源、拓扑、CSI、镜像和证书，禁止自动放宽反亲和或删除 PVC。
 
 ## 6. 创建后核对与多集群扩展
 
@@ -245,10 +281,26 @@ k -n "$NS" get service "${CLUSTER}-rw" "${CLUSTER}-ro" "${CLUSTER}-r"
 k -n "$NS" get endpointslice -l "kubernetes.io/service-name=${CLUSTER}-rw" -o wide
 k -n "$NS" get endpointslice -l "kubernetes.io/service-name=${CLUSTER}-ro" -o wide
 k -n "$NS" get lease "$CLUSTER"
+k -n "$NS" get failoverquorums.postgresql.cnpg.io "$CLUSTER" -o yaml
 k -n "$NS" describe cluster "$CLUSTER"
 ```
 
 核对三个 Pod 分别位于指定的三个节点故障域，三个数据 PVC 分别绑定到不同 RBD image，`rw` 恰有一个 Ready 主端点，`ro` 仅有 Ready 备端点。还需对照 Namespace、Owner UID、StorageClass、PV 回收策略、Ceph 卷归属、镜像实际 digest、Lease、集群条件与告警；存在额外 Ready 写主或身份对不上时停止接入业务。
+
+本示例不使用旧注解 `alpha.cnpg.io/failoverQuorum`：该注解优先于 spec，若被注入为 `false` 会关闭仲裁。核对服务端实际对象的同步策略、旧注解、隔离探测和超时；命令失败时停止接入业务并检查准入或配置漂移，不能只检查提交的 YAML。
+
+```bash
+k -n "$NS" get cluster "$CLUSTER" -o json | jq -e '
+  .spec.postgresql.synchronous.method == "any" and
+  .spec.postgresql.synchronous.number == 1 and
+  .spec.postgresql.synchronous.dataDurability == "required" and
+  .spec.postgresql.synchronous.failoverQuorum == true and
+  .spec.probes.liveness.isolationCheck.enabled == true and
+  .spec.smartShutdownTimeout == 0 and
+  ((.metadata.annotations // {}) | has("alpha.cnpg.io/failoverQuorum") | not)'
+```
+
+再检查同名 `FailoverQuorum` 对象的 `status.primary`、`standbyNumber` 和 `standbyNames` 与当前主、预期同步副本数及两个候选备节点一致；对象尚未建立或状态为空时等待调谐并排查，不得直接修改该对象。配置与状态相符也不代替实际切换和旧主隔离演练。
 
 从 Kubernetes 状态获取主 Pod 后，在主实例内执行只读查询。SQL 中的 `synchronous_commit` 仅是当前诊断会话值，不能代替业务每个会话的验证。
 
@@ -256,19 +308,47 @@ k -n "$NS" describe cluster "$CLUSTER"
 PRIMARY="$(k -n "$NS" get cluster "$CLUSTER" -o jsonpath='{.status.currentPrimary}')"
 test -n "$PRIMARY"
 k -n "$NS" exec "$PRIMARY" -c postgres -- psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 \
-  -c 'SHOW synchronous_commit' -c 'SHOW synchronous_standby_names' \
+  -c 'SHOW synchronous_commit' -c 'SHOW synchronous_standby_names' -c 'SHOW fsync' -c 'SHOW full_page_writes' -c 'SHOW wal_level' \
   -c 'SELECT application_name, state, sync_state, sent_lsn, write_lsn, flush_lsn, replay_lsn FROM pg_stat_replication' \
   -c 'SELECT slot_name, active, restart_lsn FROM pg_replication_slots' \
   -c 'SELECT archived_count, last_archived_wal, last_archived_time, failed_count, last_failed_wal, last_failed_time FROM pg_stat_archiver'
 ```
 
-确认复制连接正常、至少一个可用同步备节点和预期的同步名称；再分别在真实应用连接路径中核查提交设置和读写行为。普通用户可自行改变会话或事务的 `synchronous_commit`，仅设默认值、角色默认值或撤销参数授权不能强制所有事务同步；必须通过应用约束和验证支撑一致性目标。
+确认复制连接正常、至少一个可用同步备节点和预期的同步名称，`fsync` 与 `full_page_writes` 为 `on` 且 `wal_level` 为 `replica` 或 `logical`；再分别在真实应用连接路径中核查提交设置和读写行为。普通用户可自行改变会话或事务的 `synchronous_commit`，仅设默认值、角色默认值或撤销参数授权不能强制所有事务同步；必须通过应用约束和验证支撑一致性目标。
 
-从获准的客户端环境使用 `sslmode=verify-full`、可信 CA、实际匹配证书的 Service DNS 和受控密码文件建立连接。验证写入只能走 `rw`；允许延迟的查询走 `ro`。执行无效密码、非 TLS、错误 CA/主机名、未授权来源和只读入口写入的负向测试。受限 Pod 内连接如需使用 DNS，应使用证书 SAN 覆盖的完整域名；不要用 IP 或 `sslmode=require` 冒充身份校验。
+物理 WAL 复制和 PITR 不保护 UNLOGGED 或临时表的数据。对每个业务数据库分别盘点并确认不能丢失的数据均使用持久表；下面只检查示例 `app` 数据库，其他数据库须逐个检查：
+
+```bash
+k -n "$NS" exec "$PRIMARY" -c postgres -- psql -X -U postgres -d app -v ON_ERROR_STOP=1 \
+  -c "SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relpersistence = 'u' AND c.relkind IN ('r', 'p', 'm', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_(toast|temp_)' ORDER BY 1, 2"
+```
+
+返回的对象须按业务处理，不以查询空结果替代对临时表、外部数据和应用副作用的审查。
+
+确认 `app_readonly` 在 Cluster 的 managed roles 状态中已创建且没有成员角色；由 DBA 按业务实际 schema 和表/视图逐项授予 `USAGE` 和 `SELECT`。例如下面的两个标识符必须替换为已批准对象，在数据库 owner 或获授权身份下执行；新建对象的授权由对应创建者的默认权限单独管理。
+
+```sql
+GRANT CONNECT ON DATABASE app TO app_readonly;
+GRANT USAGE ON SCHEMA <APPROVED_SCHEMA> TO app_readonly;
+GRANT SELECT ON TABLE <APPROVED_SCHEMA>.<APPROVED_TABLE_OR_VIEW> TO app_readonly;
+```
+
+仅授权 SELECT 不自动消除所有间接写入路径。上线前还须核对 `PUBLIC`、可 `SET ROLE` 的成员关系、对象 owner、可执行函数/过程及 `SECURITY DEFINER` 等权限；按业务需要处理，避免对既有业务执行未经评估的全局撤权。`default_transaction_read_only` 可被会话修改，不是权限保障。
+
+从获准的客户端环境使用 `sslmode=verify-full`、可信 CA、实际匹配证书的 Service DNS 和受控密码文件建立连接。验证写入走 `rw`；允许延迟的查询使用 `app_readonly` 走 `ro`。执行无效密码、非 TLS、错误 CA/主机名、未授权来源的负向测试，并在隔离环境验证只读账号即使连接主库、关闭会话只读默认值，仍无法写入受保护的业务对象；备节点提升时，如原连接存活，还要通过该连接验证写入仍被拒绝，若连接断开则记录结果并验证重新连接主库的权限。备节点的只读状态和 `ro` Service 不能代替该权限验证。[PostgreSQL 热备](https://www.postgresql.org/docs/18/hot-standby.html) 受限 Pod 内连接如需使用 DNS，应使用证书 SAN 覆盖的完整域名；不要用 IP 或 `sslmode=require` 冒充身份校验。
 
 ### 6.2 建立第二套及后续集群
 
-为每套集群重复第 2、4、5、6 节：重新确定目标身份和容量，使用不同 Namespace/集群名、独立 Secret、唯一 S3 前缀和备份身份。修改示例的 `metadata.namespace`、`metadata.name`、Secret 和 ObjectStore 引用后做 server dry-run；禁止将同一套集群的 PVC、Secret 或归档路径作为新集群初始化输入。每套都需要独立的 Service/TLS、容量、备份与恢复验证，不能仅凭第一套成功标记全部成功。
+为每套集群重复第 2、4、5、6.1 和 7 节：重新确定目标身份和容量，使用不同 Namespace/集群名、独立 Secret、唯一 S3 前缀和备份身份。第二套示例须逐项替换：
+
+| 位置 | 第一套 | 第二套示例 |
+| --- | --- | --- |
+| 第 2 节环境变量 | `NS=dba-a`、`CLUSTER=pg-a` | `NS=dba-b`、`CLUSTER=pg-b`；不可沿用第 2 节中的第一套赋值 |
+| ObjectStore 元数据、Cluster 插件引用及查询命令 | `dba-a`、`pg-a-backup` | `dba-b`、`pg-b-backup`；更换对象存储空前缀及身份 |
+| Cluster、Backup、ScheduledBackup 的 Namespace、名称和集群引用 | `dba-a` / `pg-a` / `pg-a-first-backup` / `pg-a-daily` | `dba-b` / `pg-b` / `pg-b-first-backup` / `pg-b-daily`，同时替换后续 `wait` 和 `describe` 中的备份名 |
+| 恢复来源 | `serverName: pg-a` 及第一套的独立备份路径 | `serverName: pg-b` 及第二套的独立备份路径；恢复 Namespace/目标名也要独立 |
+
+Secret 名可相同但必须在各自 Namespace 重新创建，内容和授权须独立。所有清单及对应命令同步替换后再做 server dry-run；禁止将第一套 PVC、凭据或归档前缀作为第二套初始化输入。每套都需要独立的 Service/TLS、容量、备份与恢复验证，不能仅凭第一套成功标记全部成功。
 
 ## 7. 备份、恢复与持续运维
 
@@ -344,13 +424,21 @@ test "$restore_uid" = "$EXPECTED_RESTORE_KUBE_SYSTEM_UID" || { echo '恢复环�
 r get crd clusters.postgresql.cnpg.io objectstores.barmancloud.cnpg.io
 ```
 
+如果本次验收是跨集群灾难恢复，还须确认恢复 Kubernetes 的 UID 与源环境不同；该检查只能区分 Kubernetes 身份，仍须独立核验两端的存储、计算、网络及供电故障域。仅做同集群隔离 PITR 时不执行此检查，也不能将结果作为整站灾备通过。
+
+```bash
+test "$restore_uid" != "$actual_uid"
+```
+
 确认目标 `dba-restore` Namespace、`pg-a-restore` 集群和 PVC 均不存在；该 Namespace 的网络只允许恢复和验证人员访问，不连接原业务 Service。确认受支持的同 major 镜像、恢复端容量、源集群名 `pg-a`、源 ObjectStore 路径、有效的备份和完整 WAL，以及目标时区时间。仅在确认 Namespace 不存在时创建它并配置平台 RBAC、配额与网络策略；恢复对象 Secret 和 CA 在恢复 Namespace 中单独创建，使用**只读**对象身份，不复制源写凭据。
 
 ```bash
 export RESTORE_S3_ACCESS_KEY_FILE='<仓库外恢复只读 access key 文件>'
 export RESTORE_S3_SECRET_KEY_FILE='<仓库外恢复只读 secret key 文件>'
 export RESTORE_S3_CA_FILE='<仓库外恢复对象服务 CA 文件>'
-test -s "$RESTORE_S3_ACCESS_KEY_FILE" && test -s "$RESTORE_S3_SECRET_KEY_FILE" && test -s "$RESTORE_S3_CA_FILE"
+test -s "$RESTORE_S3_ACCESS_KEY_FILE"
+test -s "$RESTORE_S3_SECRET_KEY_FILE"
+test -s "$RESTORE_S3_CA_FILE"
 r create namespace "$RESTORE_NS"
 r -n "$RESTORE_NS" create secret generic restore-s3-reader \
   --from-file=ACCESS_KEY_ID="$RESTORE_S3_ACCESS_KEY_FILE" --from-file=ACCESS_SECRET_KEY="$RESTORE_S3_SECRET_KEY_FILE"
@@ -388,7 +476,7 @@ r create -f "$RESTORE_OBJECTSTORE_FILE"
 r -n "$RESTORE_NS" get objectstore restore-source-store
 ```
 
-将以下内容保存为 `restore.yaml`。`serverName` 为备份来源的实际归档服务器名；如果源没有显式覆盖，通常是源集群名，实施时应从备份元数据核实。`targetTime` 必须替换为在恢复窗口内的 RFC 3339 带时区时间；基础备份应早于该时间，且 WAL 中需有目标后记录以使时间点恢复停止。StorageClass、节点标签和资源值应替换为恢复环境已交接的配置。示例仅创建一个恢复实例，不具备高可用。
+将以下内容保存为 `restore.yaml`。`serverName` 为备份来源的实际归档服务器名；如果源没有显式覆盖，通常是源集群名，实施时应从备份元数据核实。`targetTime` 必须替换为在恢复窗口内的 RFC 3339 带时区时间；基础备份应早于该时间，且 WAL 中需有目标后记录以使时间点恢复停止。镜像同样必须使用可识别 PostgreSQL 18 的版本 tag 加 digest，且需与源数据版本兼容；StorageClass、节点标签和资源值应替换为恢复环境已交接的配置。示例仅创建一个恢复实例，不具备高可用。
 
 ```yaml
 apiVersion: postgresql.cnpg.io/v1
@@ -398,11 +486,12 @@ metadata:
   namespace: dba-restore
 spec:
   instances: 1
-  imageName: <MATCHING_CNPG_POSTGRESQL_18_IMAGE_BY_DIGEST>
+  imageName: '<RECOVERY_IMAGE_REPOSITORY>:18.6-system-trixie@sha256:<64_HEX_DIGEST>'
   postgresql:
     pg_hba:
       - hostnossl all all all reject
       - hostssl app app all scram-sha-256
+      - hostssl app app_readonly all scram-sha-256
       - hostssl all all all reject
   bootstrap:
     recovery:
@@ -434,7 +523,7 @@ spec:
 export RESTORE_FILE='<受控目录中的 restore.yaml>'
 r create --dry-run=server --validate=strict -f "$RESTORE_FILE"
 r create -f "$RESTORE_FILE"
-r -n "$RESTORE_NS" get cluster pg-a-restore -w
+r -n "$RESTORE_NS" wait --for=jsonpath='{.status.readyInstances}'=1 cluster/pg-a-restore --timeout=60m
 r -n "$RESTORE_NS" describe cluster pg-a-restore
 r -n "$RESTORE_NS" get pods,pvc,events
 ```
@@ -466,7 +555,7 @@ r -n "$RESTORE_NS" exec "$RESTORE_PRIMARY" -c postgres -- psql -X -U postgres -d
 
 逐项观察主实例状态、Lease、Operator 事件、旧主进程及客户端可达性、候选备库接收/回放位置、`rw` / `ro` 端点和客户端重新提交时间。每一笔已经收到成功响应的同步事务都要核对；响应丢失的事务列为“结果未知”并由业务对账。将主进程退出、节点断联、旧主仍可被客户端直连、API 分区、一个同步备节点失联、主和同步备同时失联分别作为独立场景，不能由单次 Pod 删除推断全部通过。
 
-以下是**独立测试集群**的单主 Pod 故障注入示例，仅覆盖 Pod 被删除这一场景。使用专门创建、没有生产数据和流量的测试 Namespace；平台须事先为其设置 `dba.example/environment=test`。启动测试客户端的连续事务记录并确认故障前至少有一笔成功提交，然后在测试端执行：
+以下是**独立测试集群**的单主 Pod 故障注入示例，仅覆盖 Pod 被删除这一场景。使用专门创建、没有生产数据和流量的测试 Namespace；平台须事先为其设置 `dba.example/environment=test`。停止并行维护和切换，启动测试客户端的连续事务记录并确认故障前至少有一笔成功提交，然后在测试端执行。删除请求带 Pod UID 前置条件，若同名 Pod 已被替换，API 将拒绝删除；它仍不能将主角色检查和删除变成跨对象原子操作。
 
 ```bash
 export TEST_NS='<专用测试 Namespace>'
@@ -475,14 +564,25 @@ test "$TEST_NS" != "$NS"
 test "$(k get namespace "$TEST_NS" -o json | jq -r '.metadata.labels["dba.example/environment"] // empty')" = 'test'
 TEST_UID="$(k -n "$TEST_NS" get cluster "$TEST_CLUSTER" -o jsonpath='{.metadata.uid}')"
 TEST_PRIMARY="$(k -n "$TEST_NS" get cluster "$TEST_CLUSTER" -o jsonpath='{.status.currentPrimary}')"
-test -n "$TEST_UID" && test -n "$TEST_PRIMARY"
-k -n "$TEST_NS" get pod "$TEST_PRIMARY" -o json | jq -e --arg uid "$TEST_UID" \
-  'any(.metadata.ownerReferences[]?; .uid == $uid and .kind == "Cluster")'
-k -n "$TEST_NS" delete pod "$TEST_PRIMARY" --wait=false
-k -n "$TEST_NS" get cluster "$TEST_CLUSTER" -w
+test -n "$TEST_UID"
+test -n "$TEST_PRIMARY"
+TEST_POD_UID="$(k -n "$TEST_NS" get pod "$TEST_PRIMARY" -o json | jq -er --arg uid "$TEST_UID" \
+  'select(any(.metadata.ownerReferences[]?; .uid == $uid and .kind == "Cluster") and .metadata.labels["cnpg.io/instanceRole"] == "primary") | .metadata.uid | select(length > 0)')"
+test -n "$TEST_POD_UID"
+test "$TEST_PRIMARY" = "$(k -n "$TEST_NS" get cluster "$TEST_CLUSTER" -o jsonpath='{.status.currentPrimary}')"
+jq -n --arg uid "$TEST_POD_UID" '{apiVersion:"v1",kind:"DeleteOptions",preconditions:{uid:$uid}}' | \
+  k delete --raw="/api/v1/namespaces/$TEST_NS/pods/$TEST_PRIMARY" -f -
+NEW_PRIMARY=''
+for ((attempt = 0; attempt < 60; attempt++)); do
+  NEW_PRIMARY="$(k -n "$TEST_NS" get cluster "$TEST_CLUSTER" -o jsonpath='{.status.currentPrimary}')"
+  if [[ -n "$NEW_PRIMARY" && "$NEW_PRIMARY" != "$TEST_PRIMARY" ]]; then break; fi
+  sleep 5
+done
+test -n "$NEW_PRIMARY"
+test "$NEW_PRIMARY" != "$TEST_PRIMARY"
 ```
 
-观察命令需操作者自行退出。新主 Ready 后，从测试客户端重新成功提交并核对每笔故障前后的已确认 ID、连接失败和结果未知的 ID；记录从删除请求到成功提交的时间。确认原实例回归为备节点、复制和备份恢复后，才能进行下一项测试。此结果不能替代 VM 掉电、旧主直连、CSI 或 Ceph 故障测试。
+轮询最多约 5 分钟；超时即停止并保留事件，不能强制晋升。新主 Ready 后，从测试客户端重新成功提交并核对每笔故障前后的已确认 ID、连接失败和结果未知的 ID；记录从删除请求到成功提交的时间。确认原实例回归为备节点、复制和备份恢复后，才能进行下一项测试。此结果不能替代 VM 掉电、旧主直连、CSI 或 Ceph 故障测试。
 
 **默认 Operator 可能自动晋升。** 旧主未知或候选数据不完整时不能声称现有配置能等待人工作出决定；必须在生产接入前证明实际隔离/仲裁覆盖该场景。演练无法满足时保持生产阻断，补充可执行隔离方案或重新选型。
 
@@ -498,13 +598,15 @@ k -n "$TEST_NS" get cluster "$TEST_CLUSTER" -w
 
 计划内切换和自动故障切换是不同场景。先验证最新备份、两个备节点状态、候选位置、旧主可安全停止、客户端重连及容量；再按目标版本 `kubectl cnpg promote` 文档执行受控切换。该命令在仲裁失败时也可能强制晋升，因此只在已确认候选安全且旧主隔离可验证时使用。[CNPG 命令说明](https://cloudnative-pg.io/docs/1.30/kubectl-plugin/)
 
-以下操作在第 2 节核对过的目标及维护窗口执行，`TARGET_INSTANCE` 必须是该集群中经人工核验已追平且 Ready 的备节点；所有权和 Ready 检查不能替代 WAL 完整性判断。操作前先记录当前主、目标和业务写入状态：
+以下操作在第 2 节核对过的目标及维护窗口执行，`TARGET_INSTANCE` 必须是该集群中经人工核验已追平且 Ready 的备节点；所有权和 Ready 检查不能替代 WAL 完整性判断。检查与 `promote` 并非跨资源原子操作，期间须停止并行维护并留意自动故障切换；状态变化或无法确认时停止，不得沿用旧检查结果。操作前先记录当前主、目标和业务写入状态：
 
 ```bash
 export TARGET_INSTANCE='<已核验的备节点 Pod 名>'
 CLUSTER_UID="$(k -n "$NS" get cluster "$CLUSTER" -o jsonpath='{.metadata.uid}')"
 CURRENT_PRIMARY="$(k -n "$NS" get cluster "$CLUSTER" -o jsonpath='{.status.currentPrimary}')"
-test -n "$CLUSTER_UID" && test -n "$CURRENT_PRIMARY" && test "$TARGET_INSTANCE" != "$CURRENT_PRIMARY"
+test -n "$CLUSTER_UID"
+test -n "$CURRENT_PRIMARY"
+test "$TARGET_INSTANCE" != "$CURRENT_PRIMARY"
 k -n "$NS" get pod "$TARGET_INSTANCE" -o json | jq -e --arg uid "$CLUSTER_UID" \
   'any(.metadata.ownerReferences[]?; .uid == $uid and .kind == "Cluster") and (.metadata.labels["cnpg.io/instanceRole"] == "replica") and any(.status.conditions[]?; .type == "Ready" and .status == "True")'
 kubectl cnpg status "$CLUSTER" --context "$KUBE_CONTEXT" -n "$NS"
@@ -514,7 +616,8 @@ kubectl cnpg status "$CLUSTER" --context "$KUBE_CONTEXT" -n "$NS"
 
 ```bash
 kubectl cnpg promote "$CLUSTER" "$TARGET_INSTANCE" --context "$KUBE_CONTEXT" -n "$NS"
-k -n "$NS" get cluster "$CLUSTER" -w
+k -n "$NS" wait --for="jsonpath={.status.currentPrimary}=$TARGET_INSTANCE" "cluster/$CLUSTER" --timeout=10m
+k -n "$NS" get cluster "$CLUSTER" -o wide
 ```
 
 待 `currentPrimary` 为目标后，复核第 6.1 节的主备、Service、Lease、同步复制、备份与客户端写入；如出现异常，停在当前状态排查，不自动反向切换或强制删除原主。
