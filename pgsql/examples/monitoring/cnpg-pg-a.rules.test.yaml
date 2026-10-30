@@ -1,0 +1,1085 @@
+rule_files:
+  - cnpg-pg-a.rules.yaml
+  - recovery-evidence.rules.yaml
+  - service-evidence.rules.yaml
+evaluation_interval: 30s
+tests:
+  - name: 一个主实例时不触发主数量异常
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1"}'
+        values: '0+0x5'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2"}'
+        values: '1+0x5'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3"}'
+        values: '1+0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DbaPostgresObservedPrimaryCount
+        exp_alerts: []
+  - name: 监控没有主实例时在持续时间后触发
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2"}'
+        values: '1+0x5'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3"}'
+        values: '1+0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DbaPostgresObservedPrimaryCount
+        exp_alerts:
+          - exp_labels:
+              dba_cluster: pg-a
+              severity: critical
+            exp_annotations:
+              summary: 监控观测到的主实例数不是一个
+              description: 检查采集链、Lease、实际写主和旧主隔离；此告警不等于独立的客户端写入探测。
+  - name: 主库的槽积压告警不将备库自身的槽误判为主库积压
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1"}'
+        values: '0+0x10'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2"}'
+        values: '1+0x10'
+      - series: 'cnpg_pg_replication_slots_pg_wal_lsn_diff{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",slot_name="slot_a",slot_type="physical"}'
+        values: '3500000000+0x10'
+      - series: 'cnpg_pg_replication_slots_pg_wal_lsn_diff{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",slot_name="slot_b",slot_type="physical"}'
+        values: '3500000000+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DbaPostgresSlotLagHigh
+        exp_alerts:
+          - exp_labels:
+              job: cnpg-postgres
+              namespace: dba-a
+              cluster: pg-a
+              pod: pg-a-1
+              slot_name: slot_a
+              slot_type: physical
+              dba_cluster: pg-a
+              severity: warning
+            exp_annotations:
+              summary: 主库复制槽保留距离超过 3 GiB
+              description: 示例对应 4GB 槽预算；先查槽所有者、消费进度和磁盘，再按运行手册处置。
+  - name: 备份指标缺失不能显示为健康
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DbaPostgresBackupMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              job: cnpg-postgres
+              namespace: dba-a
+              cluster: pg-a
+              dba_cluster: pg-a
+              severity: critical
+            exp_annotations:
+              summary: Barman 备份指标缺失
+              description: 检查插件、侧车、ObjectStore 和 Prometheus 采集，无法据此确认备份健康。
+  - name: 无实际同步备节点时触发告警
+    interval: 1m
+    input_series:
+      - series: 'cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1"}'
+        values: '0+0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DbaPostgresNoSynchronousReplica
+        exp_alerts:
+          - exp_labels:
+              job: cnpg-postgres
+              namespace: dba-a
+              cluster: pg-a
+              pod: pg-a-1
+              dba_cluster: pg-a
+              severity: critical
+            exp_annotations:
+              summary: 主库没有可确认的同步备节点
+              description: 核对复制和提交等待；不得为消除告警擅自降级同步要求。
+  - name: 其他集群的槽积压不能触发本集群告警
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-b",cluster="pg-b",pod="pg-b-1"}'
+        values: '0+0x10'
+      - series: 'cnpg_pg_replication_slots_pg_wal_lsn_diff{job="cnpg-postgres",namespace="dba-b",cluster="pg-b",pod="pg-b-1",slot_name="slot_b",slot_type="physical"}'
+        values: '3500000000+0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DbaPostgresSlotLagHigh
+        exp_alerts: []
+  - name: 缺少独立恢复点证据必须告警
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DbaDrRecoveryPointMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              dba_cluster: pg-a
+              severity: critical
+            exp_annotations:
+              summary: 独立站点恢复点证据缺失
+              description: 核对证据采集和恢复链；没有数据时不能报告灾备健康。
+  - name: 独立恢复点持续更新时不触发过期告警
+    interval: 1m
+    input_series:
+      - series: 'dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '1+60x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DbaDrRecoveryPointStale
+        exp_alerts: []
+  - name: 三实例正常且 KSM 双副本不重复计数
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance",instance="ksm-2"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",condition="true",instance="ksm-2"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance",instance="ksm-2"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",condition="true",instance="ksm-2"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance",instance="ksm-2"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",condition="true",instance="ksm-2"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '0+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1+0x12'
+      - series: 'cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresReadyInstancesBelowExpected
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresInstanceMetricsMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresInstanceInventoryAbsent
+        exp_alerts: []
+    promql_expr_test:
+      - expr: dba_postgres_ready_instances
+        eval_time: 5m
+        exp_samples:
+          - labels: dba_postgres_ready_instances{namespace="dba-a",cluster="pg-a"}
+            value: 3
+  - name: 单备库退出发现但另一同步备库正常仍须逐实例告警
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",condition="true"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '0+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1 1 stale'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1 1 stale'
+      - series: 'cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresInstanceMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              pod: pg-a-3
+              uid: uid-3
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations: &id001
+              summary: PostgreSQL 单实例指标缺失
+              description: 对照独立 Pod 清单检查实例及服务发现；up=0 和整集群缺失规则不能覆盖单个已移除目标。
+      - eval_time: 5m
+        alertname: DbaPostgresReadyInstancesBelowExpected
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresScrapeDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresNoSynchronousReplica
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresMetricsAbsent
+        exp_alerts: []
+  - name: 单备库不 Ready 且退出发现须报告副本不足
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",condition="true"}'
+        values: '1 1 0+0x10'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '0+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1 1 stale'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1 1 stale'
+      - series: 'cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresReadyInstancesBelowExpected
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations: &id002
+              summary: PostgreSQL Ready 实例数低于期望值
+              description: 核对 Cluster.spec.instances、Pod Ready、调度及存储；仍有同步备库不代表三实例冗余完整。
+      - eval_time: 5m
+        alertname: DbaPostgresInstanceMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              pod: pg-a-3
+              uid: uid-3
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations: *id001
+      - eval_time: 5m
+        alertname: DbaPostgresNoSynchronousReplica
+        exp_alerts: []
+  - name: Pod 从独立清单删除后仍须报告副本不足
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",condition="true"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '0+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1 1 stale'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1 1 stale'
+      - series: 'cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresReadyInstancesBelowExpected
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations: *id002
+  - name: 独立清单采集丢失不能显示实例健康
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: DbaPostgresInstanceInventoryAbsent
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: PostgreSQL 独立实例清单缺失
+              description: 检查 kube-state-metrics、Pod 标签允许列表及 API 发现；清单缺失不能解释为没有待监控实例。
+      - eval_time: 7m
+        alertname: DbaPostgresReadyInstancesBelowExpected
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations: *id002
+  - name: 正在删除的 Pod 不计入 Ready 冗余
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_deletion_timestamp{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresReadyInstancesBelowExpected
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations: *id002
+  - name: 同名 Pod 重建后旧 UID 指标不能掩盖新实例缺失
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-1",uid="uid-1",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-2",uid="uid-2",condition="true"}'
+        values: '1+0x12'
+      - series: 'kube_pod_labels{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-new",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}'
+        values: '1+0x12'
+      - series: 'kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",pod="pg-a-3",uid="uid-new",condition="true"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '0+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-2",uid="uid-2"}'
+        values: '1+0x12'
+      - series: 'cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1+0x12'
+      - series: 'up{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-3",uid="uid-3"}'
+        values: '1+0x12'
+      - series: 'cnpg_dba_sync_eligible_replicas{job="cnpg-postgres",namespace="dba-a",cluster="pg-a",pod="pg-a-1",uid="uid-1"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresInstanceMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              pod: pg-a-3
+              uid: uid-new
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations: *id001
+  - name: 真实提交证据持续更新时写探针健康
+    interval: 1m
+    input_series:
+      - series: 'dba_postgres_write_probe_success{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+0x12'
+      - series: 'dba_postgres_write_probe_last_attempt_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+60x12'
+      - series: 'dba_postgres_write_probe_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+60x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeFailed
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeNoRecentSuccess
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeMetricsAbsent
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeInvalid
+        exp_alerts: []
+  - name: 连续失败且没有成功提交须告警
+    interval: 1m
+    input_series:
+      - series: 'dba_postgres_write_probe_success{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '0+0x12'
+      - series: 'dba_postgres_write_probe_last_attempt_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+60x12'
+      - series: 'dba_postgres_write_probe_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeFailed
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              probe: rw
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: 业务写入口事务探针持续失败
+              description: 检查客户端路径、TLS、提交与读回；TCP 连通、Pod Ready 或 SELECT 1 不能代替成功提交。
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeNoRecentSuccess
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              probe: rw
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id003
+              summary: 业务写入口超过一分钟没有成功事务证据
+              description: 核查最后成功提交、探针失败或停止；未成功时必须保留零值，不能改写为当前时间。
+  - name: 缓存成功值但探针停止执行不能保持绿色
+    interval: 1m
+    input_series:
+      - series: 'dba_postgres_write_probe_success{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+0x12'
+      - series: 'dba_postgres_write_probe_last_attempt_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+0x12'
+      - series: 'dba_postgres_write_probe_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeStale
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              probe: rw
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: 业务写入探针停止更新
+              description: 检查探针调度、执行超时与证据输出；缓存的成功值不能作为当前可写证明。
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeNoRecentSuccess
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              probe: rw
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id003
+  - name: 写探针仅缺一个契约指标也须告警
+    interval: 1m
+    input_series:
+      - series: 'dba_postgres_write_probe_success{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+0x12'
+      - series: 'dba_postgres_write_probe_last_attempt_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '1+60x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              probe: rw
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id004
+              summary: 业务写入探针指标不完整
+              description: 三项指标均需持续暴露；核查探针和采集，不把缺失或失败解释为可写。
+  - name: 写探针全部指标缺失须告警
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              probe: rw
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id004
+  - name: 写探针未来时间与非法成功值不能伪造健康
+    interval: 1m
+    input_series:
+      - series: 'dba_postgres_write_probe_success{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '2+0x12'
+      - series: 'dba_postgres_write_probe_last_attempt_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '10000+0x12'
+      - series: 'dba_postgres_write_probe_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",probe="rw"}'
+        values: '10000+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPostgresWriteProbeInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              probe: rw
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: 业务写入探针证据值无效
+              description: success 只能为 0 或 1；核对时间戳、时钟及采集契约，禁止用未来时间延长健康状态。
+  - name: dba_verified_recovery_point_timestamp_seconds 零值 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrRecoveryPointInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id005
+              summary: 独立恢复点证据时间无效
+              description: 零值、负值、NaN 或超过时钟容差的未来时间不能作为已验证恢复点；核查证据和时钟。
+  - name: dba_verified_recovery_point_timestamp_seconds 未来时间 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '10000+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrRecoveryPointInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id005
+  - name: dba_verified_recovery_point_timestamp_seconds NaN 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: 'NaN NaN NaN NaN NaN NaN'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrRecoveryPointInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id005
+  - name: dba_verified_recovery_point_timestamp_seconds 超过证据有效期必须告警
+    interval: 1m
+    input_series:
+      - series: 'dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '-901+0x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DbaDrRecoveryPointStale
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: 独立站点已验证恢复点落后超过 15 分钟
+              description: 检查完整基础备份、连续 WAL、时间线和异地复制；不能将最近基础备份时间代替恢复点。
+  - name: dba_verified_recovery_point_timestamp_seconds 有效证据时间不误报
+    interval: 1m
+    input_series:
+      - series: 'dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrRecoveryPointInvalid
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaDrRecoveryPointStale
+        exp_alerts: []
+  - name: dba_pitr_last_success_timestamp_seconds 零值 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPitrEvidenceInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: test
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id006
+              summary: PITR 演练证据时间无效
+              description: 从未成功时不能用零值或当前时间伪造成功；核查真实恢复记录和时钟。
+  - name: dba_pitr_last_success_timestamp_seconds 未来时间 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"}'
+        values: '10000+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPitrEvidenceInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: test
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id006
+  - name: dba_pitr_last_success_timestamp_seconds NaN 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"}'
+        values: 'NaN NaN NaN NaN NaN NaN'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPitrEvidenceInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: test
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id006
+  - name: dba_pitr_last_success_timestamp_seconds 超过证据有效期必须告警
+    interval: 1m
+    input_series:
+      - series: 'dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"}'
+        values: '-2678401+0x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DbaPitrExerciseStale
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: test
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: PITR 成功演练超过 31 天
+              description: 安排隔离恢复并验证目标前后数据；只在实际恢复和数据核对通过后更新证据。
+  - name: dba_pitr_last_success_timestamp_seconds 有效证据时间不误报
+    interval: 1m
+    input_series:
+      - series: 'dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPitrEvidenceInvalid
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaPitrExerciseStale
+        exp_alerts: []
+  - name: dba_dr_last_restore_success_timestamp_seconds 零值 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrExerciseEvidenceInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id007
+              summary: 跨站恢复演练证据时间无效
+              description: 仅真实跨站恢复与数据核对通过才能记录成功时间；核查证据和时钟。
+  - name: dba_dr_last_restore_success_timestamp_seconds 未来时间 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '10000+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrExerciseEvidenceInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id007
+  - name: dba_dr_last_restore_success_timestamp_seconds NaN 不得作为有效证据
+    interval: 1m
+    input_series:
+      - series: 'dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: 'NaN NaN NaN NaN NaN NaN'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrExerciseEvidenceInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id007
+  - name: dba_dr_last_restore_success_timestamp_seconds 超过证据有效期必须告警
+    interval: 1m
+    input_series:
+      - series: 'dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '-8640001+0x12'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DbaDrExerciseStale
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: 跨站完整恢复演练超过 100 天
+              description: 在独立故障域执行完整恢复与数据核对，记录实际 RPO 和 RTO。
+  - name: dba_dr_last_restore_success_timestamp_seconds 有效证据时间不误报
+    interval: 1m
+    input_series:
+      - series: 'dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrExerciseEvidenceInvalid
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaDrExerciseStale
+        exp_alerts: []
+  - name: 三项恢复证据分别检查缺失
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DbaDrRecoveryPointMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id008
+              summary: 独立站点恢复点证据缺失
+              description: 核对证据采集和恢复链；没有数据时不能报告灾备健康。
+      - eval_time: 6m
+        alertname: DbaPitrEvidenceMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: test
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: PITR 演练证据指标缺失
+              description: 核对演练和证据采集；缺失不能视为演练通过。
+      - eval_time: 6m
+        alertname: DbaDrExerciseEvidenceMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: warning
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: 跨站恢复演练证据指标缺失
+              description: 核对跨站演练和证据采集；缺失不能视为灾备通过。
+  - name: 其他站点恢复证据不能掩盖目标站点缺失
+    interval: 1m
+    input_series:
+      - series: 'dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="other"}'
+        values: '1+60x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaDrRecoveryPointMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              site: dr-a
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id008
+  - name: 接收端回执持续更新时通知健康
+    interval: 1m
+    input_series:
+      - series: 'dba_alert_notification_last_received_timestamp_seconds{namespace="dba-a",cluster="pg-a",receiver="dba-oncall"}'
+        values: '1+60x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryInvalid
+        exp_alerts: []
+  - name: 通知心跳不再送达须告警
+    interval: 1m
+    input_series:
+      - series: 'dba_alert_notification_last_received_timestamp_seconds{namespace="dba-a",cluster="pg-a",receiver="dba-oncall"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: DbaNotificationDeliveryStale
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              receiver: dba-oncall
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations:
+              summary: DBA 值班渠道超过五分钟未确认收到心跳
+              description: 从最终接收方核对路由、抑制、静默和渠道故障；使用独立通知路径升级。
+  - name: 通知送达回执缺失须告警
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              receiver: dba-oncall
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id009
+              summary: DBA 值班通知送达回执指标缺失
+              description: 核查最终接收端和回执采集；没有回执时不能标记通知链路通过。
+  - name: 其他渠道回执不能掩盖值班渠道缺失
+    interval: 1m
+    input_series:
+      - series: 'dba_alert_notification_last_received_timestamp_seconds{namespace="dba-a",cluster="pg-a",receiver="other"}'
+        values: '1+60x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryMissing
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              receiver: dba-oncall
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id009
+  - name: 通知回执 零值 不得作为送达证明
+    interval: 1m
+    input_series:
+      - series: 'dba_alert_notification_last_received_timestamp_seconds{namespace="dba-a",cluster="pg-a",receiver="dba-oncall"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              receiver: dba-oncall
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: &id010
+              summary: DBA 通知送达回执时间无效
+              description: 核查最终送达凭据与时钟；零值、NaN 或未来时间不能证明通知送达。
+  - name: 通知回执 未来时间 不得作为送达证明
+    interval: 1m
+    input_series:
+      - series: 'dba_alert_notification_last_received_timestamp_seconds{namespace="dba-a",cluster="pg-a",receiver="dba-oncall"}'
+        values: '10000+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              receiver: dba-oncall
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id010
+  - name: 通知回执 NaN 不得作为送达证明
+    interval: 1m
+    input_series:
+      - series: 'dba_alert_notification_last_received_timestamp_seconds{namespace="dba-a",cluster="pg-a",receiver="dba-oncall"}'
+        values: 'NaN NaN NaN NaN NaN NaN'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaNotificationDeliveryInvalid
+        exp_alerts:
+          - exp_labels:
+              namespace: dba-a
+              cluster: pg-a
+              receiver: dba-oncall
+              severity: critical
+              dba_cluster: pg-a
+            exp_annotations: *id010
+  - name: Prometheus 没有发现 Alertmanager
+    interval: 1m
+    input_series:
+      - series: 'prometheus_notifications_alertmanagers_discovered{job="prometheus",instance="prom-1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPrometheusAlertmanagerUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: prometheus
+              instance: prom-1
+              severity: critical
+            exp_annotations:
+              summary: Prometheus 没有发现可用 Alertmanager
+              description: 检查发现、配置、TLS 与网络；应通过独立通道升级监控链路故障。
+  - name: Prometheus 发送错误须告警
+    interval: 1m
+    input_series:
+      - series: 'prometheus_notifications_errors_total{job="prometheus",instance="prom-1",alertmanager="am-1"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaPrometheusNotificationErrors
+        exp_alerts:
+          - exp_labels:
+              job: prometheus
+              instance: prom-1
+              severity: critical
+            exp_annotations:
+              summary: Prometheus 向 Alertmanager 发送告警失败
+              description: 核查发送错误、排队与接收端；规则 firing 不代表通知送达。
+  - name: Alertmanager 渠道失败须告警
+    interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="alertmanager",instance="am-1",integration="webhook"}'
+        values: '0+1x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaAlertmanagerNotificationFailures
+        exp_alerts:
+          - exp_labels:
+              job: alertmanager
+              instance: am-1
+              integration: webhook
+              severity: critical
+            exp_annotations:
+              summary: Alertmanager 向通知渠道发送失败
+              description: 检查渠道权限、限流、TLS、重试和备用路由；成功 HTTP 响应仍不等于最终值班端已收到。
+  - name: Alertmanager 配置未加载须告警
+    interval: 1m
+    input_series:
+      - series: 'alertmanager_config_last_reload_successful{job="alertmanager",instance="am-1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DbaAlertmanagerConfigReloadFailed
+        exp_alerts:
+          - exp_labels:
+              job: alertmanager
+              instance: am-1
+              severity: critical
+            exp_annotations:
+              summary: Alertmanager 最近一次配置加载失败
+              description: 核对实际生效配置、路由与接收方，不能按未加载的新配置判断通知正常。
+  - name: 通知链路自监控缺失和持续心跳均须可见
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: DbaPrometheusNotificationMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              job: prometheus
+              severity: critical
+            exp_annotations:
+              summary: Prometheus 通知链路指标缺失
+              description: 检查自监控采集，并通过外部心跳检查排除整个监控栈不可用。
+      - eval_time: 7m
+        alertname: DbaAlertmanagerMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              job: alertmanager
+              severity: critical
+            exp_annotations:
+              summary: Alertmanager 自监控指标缺失
+              description: 检查进程、发现与抓取，并核对独立心跳接收端。
+      - eval_time: 7m
+        alertname: DbaNotificationWatchdog
+        exp_alerts:
+          - exp_labels:
+              severity: none
+              namespace: dba-a
+              cluster: pg-a
+              dba_cluster: pg-a
+              receiver: dba-oncall
+            exp_annotations:
+              summary: DBA 通知链路持续心跳
+              description: 最终接收端确认送达后记录时间；不得由规则计算时间替代回执。

@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 
 FIELDS = ("run_id", "expected_count", "seq", "started_utc", "finished_utc", "outcome")
-REPOSITORY = Path(__file__).resolve().parent.parent
+REPOSITORY = Path(__file__).resolve().parents[2]
 
 
 def utc_now():

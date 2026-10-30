@@ -26,5 +26,7 @@ scrape_configs:
         target_label: namespace
       - source_labels: [__meta_kubernetes_pod_name]
         target_label: pod
+      - source_labels: [__meta_kubernetes_pod_uid]
+        target_label: uid
       - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
         target_label: cluster

@@ -122,7 +122,7 @@ flowchart LR
 4. 备份是否有独立故障域对象存储？请确定恢复窗口、灾难恢复 RPO/RTO 和定期恢复演练频率。
 5. 主要客户端是否仅在 Kubernetes 内，是否需要受控的集群外 TCP 入口和连接池？
 
-方案对应的[运维架构设计](../docs/postgresql/architecture.md)和[部署与验收文档](../docs/postgresql/deployment.md)已编写。实际部署前仍需完成各环境的版本锁、容量和故障验证。
+方案对应的[运维架构设计](../docs/architecture.md)和[部署与验收文档](../docs/deployment.md)已编写。目标 Kubernetes/Ceph 按最新稳定版本持续升级；实际部署和每次升级均须完成精确版本记录、兼容矩阵、容量和故障复验，见[当前运维手册](../docs/operations.md#1-版本与交接基线)。本方案保留审核时的选型背景，不代表旧参考版本已兼容未来平台。
 
 ## 参考资料
 

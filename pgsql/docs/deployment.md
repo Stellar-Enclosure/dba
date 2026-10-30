@@ -3,6 +3,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 编制日期 | 2026-10-28 |
+| 修订日期 | 2026-10-30 |
 | 部署对象 | 已交接的 Kubernetes、独立 Ceph 和对象备份环境 |
 | 适用路径 | CloudNativePG、PostgreSQL 一主两备、Ceph-CSI RBD、Barman Cloud Plugin |
 | 关联设计 | [运维架构设计](architecture.md) |
@@ -24,7 +25,7 @@
 | 备份 | 独立故障域对象存储、唯一空前缀、TLS CA、受限写身份、恢复只读身份、保留周期和恢复环境 |
 | 可用性 | 自动切换、旧主隔离、仲裁不足、应用会话同步提交、PITR、告警和故障演练的可验证验收标准 |
 
-示例参考 CloudNativePG **1.30.1**、PostgreSQL **18.6** 和 Barman Cloud Plugin **0.15.1** 的接口；CNPG 1.30 文档的支持矩阵包括 Kubernetes 1.34–1.36 和 PostgreSQL 14–18。它们是本文编写时的参考组合，不是永久版本锁：实施时必须重新确认版本支持、安全修复、实际镜像及插件兼容，固定补丁版本和 digest。[CNPG 1.30 发行说明](https://cloudnative-pg.io/docs/1.30/release_notes/v1.30/)、[Barman 插件安装](https://cloudnative-pg.io/plugin-barman-cloud/docs/installation/)
+示例参考 CloudNativePG **1.30.1**、PostgreSQL **18.6** 和 Barman Cloud Plugin **0.15.1** 的接口；CNPG 1.30 文档的支持矩阵包括 Kubernetes 1.34–1.36 和 PostgreSQL 14–18。目标平台按最新稳定 Kubernetes/Ceph 持续升级；上述旧参考组合不是平台版本上限。CNPG 1.30 对 K8s 1.37 仅列为已测试但不支持，不能据此声明最新平台正式兼容；选择支持实际平台的组件组合，并执行[持续升级检查](operations.md#11-每次平台升级的检查与回退)。它们是示例接口，不是永久版本锁：实施时必须重新确认版本支持、安全修复、实际镜像及插件兼容，固定补丁版本和 digest。[CNPG 1.30 发行说明](https://cloudnative-pg.io/docs/1.30/release_notes/v1.30/)、[Barman 插件安装](https://cloudnative-pg.io/plugin-barman-cloud/docs/installation/)
 
 示例采用同步副本数 1、`dataDurability: required` 和 `failoverQuorum: true`。后者在所参考文档中仍属实验性，必须核实版本和生产接受条件。**若旧主隔离、仲裁、应用会话提交语义或独立恢复无法通过实际验证，不得将示例接入需要该保障的生产业务。** 不能假定 `primaryUpdateStrategy: supervised` 或人工值守会阻止故障自动切换；前者只影响受管更新。
 
@@ -62,6 +63,7 @@ fi
 
 ```bash
 ceph fsid
+ceph versions
 ceph health detail
 ceph osd tree
 ceph df detail
@@ -112,7 +114,7 @@ k get crd objectstores.barmancloud.cnpg.io
 
 只在确认 Namespace 不存在时新建；先应用平台的 PSA、ResourceQuota、LimitRange、RBAC 和网络策略。测试时必须允许第 7.3 节列出的实际连接路径，同时验证未授权访问被拒绝。节点上所需的 CSI 和镜像已由平台交付。
 
-[配额示例](../../examples/namespace/pg-a-quota.yaml)、[网络策略示例](../../examples/network/pg-a-networkpolicy.yaml)和[监控查询示例](../../examples/monitoring/cnpg-pg-a.custom-queries.yaml)须先在受控目录替换集群/Namespace、实际标签、API 与对象存储 CIDR。配额必须容纳三个 PostgreSQL 实例、初始化/重建 Job、插件 sidecar、并发备份和恢复目标；LimitRange 的默认限制可能导致 sidecar OOM 或限速，不能照搬示例值。`requests.storage` 是 PVC 逻辑申请上限，不是 Ceph 原始容量预留。
+[配额示例](../examples/namespace/pg-a-quota.yaml)、[网络策略示例](../examples/network/pg-a-networkpolicy.yaml)和[监控查询示例](../examples/monitoring/cnpg-pg-a.custom-queries.yaml)须先在受控目录替换集群/Namespace、实际标签、API 与对象存储 CIDR。配额必须容纳三个 PostgreSQL 实例、初始化/重建 Job、插件 sidecar、并发备份和恢复目标；LimitRange 的默认限制可能导致 sidecar OOM 或限速，不能照搬示例值。`requests.storage` 是 PVC 逻辑申请上限，不是 Ceph 原始容量预留。
 
 ```bash
 k create namespace "$NS"
@@ -280,7 +282,7 @@ spec:
         barmanObjectName: pg-a-backup
 ```
 
-用户定义 HBA 规则位于 CNPG 固定的本地/复制/连接池规则之后、默认规则之前。示例允许 `app` 和 `app_readonly` 角色经 TLS 访问 `app` 数据库；增加业务角色、监控身份或连接池时必须先调整并验证规则。`app` 是初始化的数据库 owner，不应作为生产只读账号；生产写账号也应按业务对象单独授权。`hostssl ... all` 不限制网络来源，仍须由经验证的网络策略和授权来源限制访问。示例设置 `smartShutdownTimeout: 0` 缩小探测触发后的旧连接窗口，但不构成外部 fencing。启用 metrics TLS 须同步交付可信 CA 与采集配置；修改已有集群的该开关会触发滚动更新。`customQueriesConfigMap` 引用[监控查询示例](../../examples/monitoring/cnpg-pg-a.custom-queries.yaml)，该能力在参考版本为 beta，须验证查询权限、性能和指标缺失告警。[CNPG 监控](https://cloudnative-pg.io/docs/1.30/monitoring/)
+用户定义 HBA 规则位于 CNPG 固定的本地/复制/连接池规则之后、默认规则之前。示例允许 `app` 和 `app_readonly` 角色经 TLS 访问 `app` 数据库；增加业务角色、监控身份或连接池时必须先调整并验证规则。`app` 是初始化的数据库 owner，不应作为生产只读账号；生产写账号也应按业务对象单独授权。`hostssl ... all` 不限制网络来源，仍须由经验证的网络策略和授权来源限制访问。示例设置 `smartShutdownTimeout: 0` 缩小探测触发后的旧连接窗口，但不构成外部 fencing。启用 metrics TLS 须同步交付可信 CA 与采集配置；修改已有集群的该开关会触发滚动更新。`customQueriesConfigMap` 引用[监控查询示例](../examples/monitoring/cnpg-pg-a.custom-queries.yaml)，该能力在参考版本为 beta，须验证查询权限、性能和指标缺失告警。[CNPG 监控](https://cloudnative-pg.io/docs/1.30/monitoring/)
 
 ```bash
 export CLUSTER_FILE='<受控目录中的 cluster.yaml>'
@@ -569,7 +571,7 @@ r -n "$RESTORE_NS" exec "$RESTORE_PRIMARY" -c postgres -- psql -X -U postgres -d
 
 依据锁定版本和实际服务端口生成最小访问清单：应用与实例 TCP 5432；同集群实例和 Job 双向 TCP 5432/8000；Operator 到实例 TCP 5432/8000；监控到实例 TCP 9187；API server 到 Operator webhook TCP 9443；Operator、实例及插件到 Kubernetes API、DNS、插件服务和 HTTPS 对象存储。具体源与目标见[通信矩阵及 NetworkPolicy](operations.md#2-网络与最小权限)。插件服务端口、节点到 Ceph MON/OSD、监控方式和 API 出入口以交接配置为准。
 
-逐一验证允许和拒绝，特别确认默认拒绝策略没有阻断 Operator 状态访问、Lease 更新、插件 WAL 上传或证书续期。为每套集群配置写主可用性、同步备节点数、复制延迟、卷和 WAL 水位、归档/备份失败、独立副本可恢复点、证书到期与 Ceph 健康告警；通过真实故障或受控探针验证通知到达值班接收方。
+逐一验证允许和拒绝，特别确认默认拒绝策略没有阻断 Operator 状态访问、Lease 更新、插件 WAL 上传或证书续期。为每套集群配置实际 Ready 低于期望值、逐实例指标缺失、独立业务事务探针、写主可用性、同步备节点数、复制延迟、卷和 WAL 水位、归档/备份失败、独立副本可恢复点、证书到期与 Ceph 健康告警；恢复证据与通知规则见[运维手册](operations.md#8-指标告警和-grafana)。通过真实故障或受控探针验证通知到达最终值班接收方，包含恢复消息、人员确认、未确认升级与独立心跳超时；不是仅看到规则 firing。
 
 ## 8. 故障切换、回退与日常处理
 
@@ -577,7 +579,7 @@ r -n "$RESTORE_NS" exec "$RESTORE_PRIMARY" -c postgres -- psql -X -U postgres -d
 
 在隔离测试环境先检查：三个实例分布、同步备节点、`failoverQuorum` 与有效配置、旧主隔离机制、备份、连续写入客户端和异常回滚/幂等策略。记录每笔事务唯一 ID、提交确认时间及连接失败；然后在授权窗口按事先批准的单故障方案实施。本文不提供对生产主 Pod 的盲删命令。
 
-逐项观察主实例状态、Lease、Operator 事件、旧主进程及客户端可达性、候选备库接收/回放位置、`rw` / `ro` 端点和客户端重新提交时间。每一笔已经收到成功响应的同步事务都要核对；响应丢失的事务列为“结果未知”并由业务对账。将主进程退出、节点断联、旧主仍可被客户端直连、API 分区、一个同步备节点失联、主和同步备同时失联分别作为独立场景，不能由单次 Pod 删除推断全部通过。
+逐项观察主实例状态、Lease、Operator 事件、旧主进程及客户端可达性、候选备库接收/回放位置、`rw` / `ro` 端点和客户端重新提交时间。每一笔已经收到成功响应的同步事务都要核对；响应丢失的事务列为“结果未知”并由业务对账。将主进程退出、节点断联、旧主仍可被客户端直连、API 分区、一个同步备节点失联、主和同步备同时失联分别作为独立场景，不能由单次 Pod 删除推断全部通过。旧主与控制面分区而业务可达的测试必须按[强制分区验收](acceptance.md#41-旧主与控制面分区的强制验收)覆盖，不能先切断业务到旧主来冒充隔离成功。
 
 以下是**独立测试集群**的单主 Pod 故障注入示例，仅覆盖 Pod 被删除这一场景。使用专门创建、没有生产数据和流量的测试 Namespace；平台须事先为其设置 `dba.example/environment=test`。停止并行维护和切换，启动测试客户端的连续事务记录并确认故障前至少有一笔成功提交，然后在测试端执行。删除请求带 Pod UID 前置条件，若同名 Pod 已被替换，API 将拒绝删除；它仍不能将主角色检查和删除变成跨对象原子操作。
 

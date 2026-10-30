@@ -4,6 +4,66 @@ groups:
   - name: dba.cnpg-pg-a
     interval: 30s
     rules:
+      # 期望值来自经批准的 Cluster.spec.instances，扩缩容时与规则同步变更。
+      # 不从实际 Pod 或抓取目标数量反推期望值，避免实例丢失时一起下降。
+      - record: dba_postgres_expected_instances
+        expr: vector(3)
+        labels:
+          namespace: dba-a
+          cluster: pg-a
+      # kube-state-metrics 需允许 cnpg.io/cluster 和 cnpg.io/podRole 标签。
+      # 去掉采集副本标签，保留 UID，避免同名 Pod 重建或 HA 采集被重复计数。
+      - record: dba_postgres_instance_info
+        expr: |
+          max by(namespace,pod,uid) (
+            kube_pod_labels{job="kube-state-metrics",namespace="dba-a",label_cnpg_io_cluster="pg-a",label_cnpg_io_pod_role="instance"}
+          )
+          unless on(namespace,pod,uid)
+          kube_pod_deletion_timestamp{job="kube-state-metrics",namespace="dba-a"}
+        labels:
+          cluster: pg-a
+      - record: dba_postgres_ready_instances
+        expr: |
+          sum by(namespace,cluster) (
+            dba_postgres_instance_info{namespace="dba-a",cluster="pg-a"}
+            * on(namespace,pod,uid) group_left
+            max by(namespace,pod,uid) (
+              kube_pod_status_ready{job="kube-state-metrics",namespace="dba-a",condition="true"}
+            )
+          ) or on(namespace,cluster)
+          (0 * dba_postgres_expected_instances{namespace="dba-a",cluster="pg-a"})
+      - alert: DbaPostgresReadyInstancesBelowExpected
+        expr: |
+          dba_postgres_ready_instances{namespace="dba-a",cluster="pg-a"}
+          < on(namespace,cluster) dba_postgres_expected_instances{namespace="dba-a",cluster="pg-a"}
+        for: 2m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: PostgreSQL Ready 实例数低于期望值
+          description: 核对 Cluster.spec.instances、Pod Ready、调度及存储；仍有同步备库不代表三实例冗余完整。
+      - alert: DbaPostgresInstanceMetricsMissing
+        expr: |
+          dba_postgres_instance_info{namespace="dba-a",cluster="pg-a"}
+          unless on(namespace,cluster,pod,uid)
+          cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"}
+        for: 2m
+        labels:
+          severity: warning
+          dba_cluster: pg-a
+        annotations:
+          summary: PostgreSQL 单实例指标缺失
+          description: 对照独立 Pod 清单检查实例及服务发现；up=0 和整集群缺失规则不能覆盖单个已移除目标。
+      - alert: DbaPostgresInstanceInventoryAbsent
+        expr: absent_over_time(dba_postgres_instance_info{namespace="dba-a",cluster="pg-a"}[5m])
+        for: 1m
+        labels:
+          severity: critical
+          dba_cluster: pg-a
+        annotations:
+          summary: PostgreSQL 独立实例清单缺失
+          description: 检查 kube-state-metrics、Pod 标签允许列表及 API 发现；清单缺失不能解释为没有待监控实例。
       - alert: DbaPostgresObservedPrimaryCount
         expr: |
           (sum(cnpg_pg_replication_in_recovery{job="cnpg-postgres",namespace="dba-a",cluster="pg-a"} == bool 0) or vector(0)) != 1

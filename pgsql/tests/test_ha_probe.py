@@ -97,6 +97,15 @@ class HaProbeTests(unittest.TestCase):
         self.assertNotEqual(self.write_probe().returncode, 0)
         self.assertEqual(self.evidence.read_bytes(), before)
 
+    def test_rejects_evidence_in_repository_root_after_directory_move(self):
+        evidence = SCRIPT.parents[2] / "README.md"
+        before = evidence.read_bytes()
+        result = self.run_probe("write", "--expected-db", "app", "--evidence", str(evidence),
+                                "--test-only", "--count", "1", "--interval", "0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("证据文件必须位于仓库外", result.stderr)
+        self.assertEqual(evidence.read_bytes(), before)
+
     def test_rejects_bad_connection_policy_before_creating_evidence(self):
         self.env["PGSSLMODE"] = "require"
         result = self.write_probe()

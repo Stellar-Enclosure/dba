@@ -4,22 +4,30 @@
 
 ## 1. 版本与交接基线
 
-仓库当前**没有已批准的目标环境版本锁**。下面是用于核对示例的参考版本，不代表任何环境已安装或验收；部署时应在仓库外的环境交接单中记录实际版本、镜像 tag 和 digest、Chart/CRD 摘要、支持期限及核验日期。
+目标平台按**Kubernetes 和 Ceph 最新稳定版本并持续升级**维护，不把旧参考组合当作环境上限，也不使用滚动 `latest` tag 部署数据库。每次部署/升级仍须生成一份有日期的精确版本记录：升级前后版本、镜像 tag/digest、Chart/CRD 摘要、内核与驱动、支持矩阵来源、变更单和验收结果。仓库没有实际环境的补丁版本与验收记录；“最新”是更新策略，不能代替可重现的版本记录。
 
-| 组件 | 本文核对基线 | 交接要求 |
+| 组件 | 2026-10-30 文档核对与示例接口 | 持续维护要求 |
 | --- | --- | --- |
-| CloudNativePG | 1.30.1；官方清单默认单 Operator、带 `--leader-elect` | 确认完整 CRD、Webhook、Operator 与实例管理器版本；检查发行说明和安全修复 |
-| PostgreSQL | 18.6，CNPG 兼容镜像 | 精确到补丁和镜像 digest；确认扩展、排序规则及恢复镜像兼容 |
-| Barman Cloud Plugin | 0.15.1 | 固定插件 Deployment 和 `SIDECAR_IMAGE`；验证与所选 CNPG/S3 的兼容性 |
-| Kubernetes | CNPG 1.30 支持 1.34–1.36 | 记录实际补丁、CNI、DNS、CSI sidecar、API Service/VIP 及策略生效路径 |
-| Ceph / Ceph-CSI | 参考 Ceph Tentacle 20.2.4、Ceph-CSI 3.18.1；Ceph-CSI 对 Kubernetes 1.34–1.36 有测试矩阵 | 不把参考版本当作目标已部署；核对 Ceph、内核客户端、CSI、镜像及 RBD 特性组合 |
-| Prometheus / Grafana | 仓库尚未锁定部署版本 | 验证采集标签、规则加载、告警路由、数据源和仪表盘；示例规则为原生 Prometheus 文件 |
+| Kubernetes | 官方发布页列出 1.37.1；以现场最新稳定版的精确补丁为准 | 记录控制面/kubelet/kubectl、CNI、DNS、CSI sidecar 及 API 路径；核对版本偏差与 API 变化 |
+| Ceph | 官方发布索引最新稳定系列为 Umbrella 21.2.0；旧示例参考 Tentacle 20.2.4 | 记录实际 Ceph/内核客户端/CSI/RBD 特性组合、FSID 和 CRUSH 域；按官方受支持路径滚动升级 |
+| CloudNativePG | 现有清单/参数参考 1.30.1；1.30 支持矩阵将 K8s 1.37 列为 tested, but not supported | 应选正式支持目标 K8s 的维护版本并校验 CRD/Webhook/实例管理器；“已测试”不等于官方支持，计划发布日期不等于已发布 |
+| PostgreSQL | 示例接口为 18.6，使用 CNPG 兼容镜像 | 在所选 major 中跟进受支持补丁与扩展；更换 major 必须单独迁移验收 |
+| Barman Cloud Plugin | 示例接口为 0.15.1 | 核对 CNPG/PG/S3 兼容性，同时记录插件 Deployment 和 `SIDECAR_IMAGE` |
+| Ceph-CSI | 旧示例参考 3.18.1；不由旧 Kubernetes 测试范围推断最新平台兼容 | 每次对照所选正式版本的支持矩阵、内核、sidecar、RBD 映射/扩容/重挂验证 |
+| Prometheus / Alertmanager / kube-state-metrics / Grafana | 环境版本未记录；规则为原生 Prometheus 文件 | 记录实际版本、标签允许列表、规则加载/错误、自监控、路由和仪表盘变化 |
 
-参考：[CNPG 1.30 发行说明](https://cloudnative-pg.io/docs/1.30/release_notes/v1.30/)、[Ceph-CSI 支持矩阵](https://github.com/ceph/ceph-csi/tree/v3.18.1)、[Ceph Tentacle 发行说明](https://docs.ceph.com/en/tentacle/releases/tentacle/)、[Barman 插件 0.15.1](https://github.com/cloudnative-pg/plugin-barman-cloud/blob/v0.15.1/web/versioned_docs/version-0.15.1/intro.md)。版本、后端和底层物理域有任一项未知时，保持生产前置条件未通过。
+来源：[Kubernetes 发布页](https://kubernetes.io/releases/)、[Ceph 发布索引](https://docs.ceph.com/en/latest/releases/)、[CNPG 支持矩阵](https://cloudnative-pg.io/docs/1.30/supported_releases/)、[Ceph-CSI 支持矩阵](https://github.com/ceph/ceph-csi/blob/v3.18.1/README.md)、[Barman 插件](https://cloudnative-pg.io/plugin-barman-cloud/docs/intro/)。这些是查阅时的官方资料，**不代表现场版本或兼容验收**；未来升级按届时正式发布资料重新核验。若最新平台超出所选数据库组件的正式支持范围，应登记兼容缺口，选择受支持组件或按组织流程完成额外验证及风险接受，不能沿用旧证据直接判通过。
+
+### 1.1 每次平台升级的检查与回退
+
+1. 记录当前/目标完整组合和混合版本阶段；检查 Kubernetes 版本偏差、API/准入变化、CNPG/插件/CSI 支持矩阵、Ceph 升级路径和不可逆步骤。保留上一组合的配置与恢复物料；恢复方案以备份和新目标重建为基础，不假定 Ceph、CRD 或数据格式可以原地降级。
+2. 在相同组合的测试环境先过离线渲染、服务端准入和实际备份恢复，再做低风险集群试点。K8s、CNI/内核、Ceph、CSI、Operator、PG、插件分批变更，每批恢复基线后再继续，保留 N-1 节点/副本与容量余量。
+3. 每批检查 `.spec.instances` 与期望实例规则一致、三实例 Ready、逐实例指标、同步备库、独立业务写入、TLS、WAL 归档、PVC/Ceph 延迟与恢复链。重新验证告警 firing/恢复及最终接收方回执；标签/指标改名不能被当作无告警。
+4. 对 K8s、CNI/内核、CNPG 实例管理器或存储/隔离路径的变化，重新执行[旧主分区验收](acceptance.md#41-旧主与控制面分区的强制验收)；新组合的恢复链须有 PITR 验证。旧证据保留归档，不能自动继承为新组合通过。异常时停止下一批，按该变更受支持的回退/重建路径恢复并核对 ACK。
 
 ## 2. 网络与最小权限
 
-[示例 NetworkPolicy](../../examples/network/pg-a-networkpolicy.yaml)选中 `dba-a` 中 `cnpg.io/cluster=pg-a`、`app.kubernetes.io/name=postgresql`、`app.kubernetes.io/component=database` 的 Pod；在 CNPG 1.30.1 中这些标签覆盖数据库实例和该集群的 initdb/join/recovery Job。实例/Job 互通使用同 Namespace 的同集群标签；在没有额外放行策略且 CNI 正确实施的前提下，不能访问同空间其他数据库集群。
+[示例 NetworkPolicy](../examples/network/pg-a-networkpolicy.yaml)选中 `dba-a` 中 `cnpg.io/cluster=pg-a`、`app.kubernetes.io/name=postgresql`、`app.kubernetes.io/component=database` 的 Pod；在 CNPG 1.30.1 中这些标签覆盖数据库实例和该集群的 initdb/join/recovery Job。实例/Job 互通使用同 Namespace 的同集群标签；在没有额外放行策略且 CNI 正确实施的前提下，不能访问同空间其他数据库集群。
 
 | 源 → 目标 | 目的端口 | 用途与验收 |
 | --- | --- | --- |
@@ -88,11 +96,11 @@ CNPG 1.30.1 的默认 `smartShutdownTimeout=180s`、`stopDelay=1800s`、`switcho
 | Kubernetes API/Operator 不可用或旧主网络分区 | 不假设能选主或隔离；先验证客户端、Lease 和旧主，再恢复控制面/隔离；RTO 按事件测量，无法证明安全时不接入写流量 |
 | Ceph/存储故障、对象存储或整站不可用 | 多套数据库可能同时受影响；PITR/异地恢复 RPO 取决于独立站点的实际连续 WAL，RTO 按数据量、吞吐与对账测量 |
 
-`failoverQuorum` 在参考版仍需按实验功能管理，旧注解会覆盖 spec，`kubectl cnpg promote` 可以绕过仲裁；只有有效策略、完整候选、旧主 fencing、会话同步提交和底层持久化共同成立的已演练场景，才可按目标报告 RPO。一个 Service 已改端点或卷标为 RWO 不等于旧主已停止；外部节点/网络隔离要在实际故障路径验证。
+`failoverQuorum` 在参考版仍需按实验功能管理，旧注解会覆盖 spec，`kubectl cnpg promote` 可以绕过仲裁；只有有效策略、完整候选、旧主 fencing、会话同步提交和底层持久化共同成立的已演练场景，才可按目标报告 RPO。Lease 过期、Service 已改端点和 RWO/RWOP 卷均不能单独证明旧主停止写入；每个实例本来就有独立 RBD，新主不需要争夺旧主的卷。必须执行[旧主与控制面分区、业务仍能连接旧主的验收](acceptance.md#41-旧主与控制面分区的强制验收)，以旧主停止/拒绝写入、新主完成提升和首次成功提交的时间线证明没有两个可写主；外部节点/网络隔离要在实际故障路径验证。
 
 ## 5. Operator 与多集群变更
 
-[Operator 补丁](../../examples/operator/cnpg-ha-patch.yaml)针对 CNPG 1.30.1 的官方 Deployment：2 副本、`--leader-elect` 保持来自基础清单、hostname 必需反亲和、`maxUnavailable: 1`/`maxSurge: 0`，并设置示例 requests/limits 和延迟；[PDB 示例](../../examples/operator/cnpg-pdb.yaml)要求至少一个副本可用。至少两个符合 `dba.example/operator-eligible=true` 的独立节点，以及单节点故障后资源余量；两副本不是双 leader，Lease/API 故障仍可阻断协调。PDB 只约束自愿驱逐，不约束 Deployment 直接滚动删除，也不能代替备份或节点隔离。
+[Operator 补丁](../examples/operator/cnpg-ha-patch.yaml)针对 CNPG 1.30.1 的官方 Deployment：2 副本、`--leader-elect` 保持来自基础清单、hostname 必需反亲和、`maxUnavailable: 1`/`maxSurge: 0`，并设置示例 requests/limits 和延迟；[PDB 示例](../examples/operator/cnpg-pdb.yaml)要求至少一个副本可用。至少两个符合 `dba.example/operator-eligible=true` 的独立节点，以及单节点故障后资源余量；两副本不是双 leader，Lease/API 故障仍可阻断协调。PDB 只约束自愿驱逐，不约束 Deployment 直接滚动删除，也不能代替备份或节点隔离。
 
 这是 strategic merge 补丁，不能单独 `kubectl apply`。在受控空目录放入已核验的 1.30.1 官方完整清单 `base.yaml`、补丁 `ha-patch.yaml` 和 PDB `pdb.yaml`，再创建以下 `kustomization.yaml` 并离线渲染：
 
@@ -130,23 +138,76 @@ kubectl kustomize '<受控渲染目录>' > '<受控目录>/cnpg-rendered.yaml'
 
 `barman_cloud_cloudnative_pg_io_first_recoverability_point` 是**最早**恢复点，不能用作最新 WAL 或异地 RPO；`last_available_backup_timestamp` 是最近基础备份，不证明后续 WAL、异地复制或恢复成功。独立站点最新可恢复时间需由可读取的连续归档与受控恢复/事务标记验证。通过平台既有监控记录最近成功跨站恢复时间、最近验证的独立恢复点、备份/复制失败及其年龄；若没有采集器或自动验证，明确列为人工值班检查与未自动化项，禁止用缺失指标生成绿色状态。
 
-[恢复证据规则](../../examples/monitoring/recovery-evidence.rules.yaml)使用三个明确的**自定义指标契约**，不是 CNPG/Barman/Ceph 的内置指标：`dba_verified_recovery_point_timestamp_seconds` 为独立站点经连续基础备份/WAL/时间线和受控标记验证的最新恢复点，`dba_pitr_last_success_timestamp_seconds` 为最近一次真实 PITR 核对通过时间，`dba_dr_last_restore_success_timestamp_seconds` 为最近一次真实跨站完整恢复核对通过时间。它们都必须持续暴露 Unix 时间戳及 `namespace/cluster/site` 标签；只有相应证据确实通过才能更新，不能由备份完成事件推导。可复用平台已有的证据采集或 textfile collector，不要求引入新服务；未接入时规则的缺失告警会触发，且生产灾备验收保持未通过。
+[恢复证据规则](../examples/monitoring/recovery-evidence.rules.yaml)使用三个**自定义指标契约**，均不是 CNPG/Barman/Ceph 内置指标。复用平台已有证据采集或 textfile collector；本仓库提供契约和告警，不部署采集服务。
+
+| 指标及固定维度 | 允许推进时间的真实证据 | 告警起点 |
+| --- | --- | --- |
+| `dba_verified_recovery_point_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}` | 独立站点可读的完整基础备份、连续 WAL/时间线与恢复标记，指向**数据可恢复到的时间** | 落后 >900s 持续 2min；整项缺失窗口 15min 后持续 2min |
+| `dba_pitr_last_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="test"}` | 新建隔离集群的 PITR 完成，目标前标记存在、目标后标记不存在且数据核对通过的完成时间 | >31 天持续 5min；缺失窗口 1h 后持续 5min |
+| `dba_dr_last_restore_success_timestamp_seconds{namespace="dba-a",cluster="pg-a",site="dr-a"}` | 源站不可用条件下，在独立故障域完整恢复、核对数据及 RPO/RTO 通过的完成时间 | >100 天持续 5min；缺失窗口 1h 后持续 5min |
+
+三项都以秒为单位的 Unix 时间持续暴露，每个预期 `namespace/cluster/site` 必须有自己的序列；其他站点、其他集群成功不能覆盖缺失。保存上次成功值，失败不能刷新成功时间，也不能在采集器重启、备份完成或抓取时改为当前时间。没有成功证据时暴露 `0` 并保持未通过；零值、负值、NaN、超出 60 秒时钟容差的未来值均有独立 critical 规则，不能等到月/季度窗口才发现无效数据。
+
+采集端应持久化结果、原子更新证据，保留受控 run ID、验证人、备份 ID、timeline/LSN、标记、源/目标身份、实际 RPO/RTO 和日志引用；高基数证据 ID 不放入指标标签。输出周期应短于缺失窗口（示例 ≤60s），成功时间保持原值；采集失败不可伪造新结果。缺失窗口表示最近一段时间没有样本，再叠加规则 `for`，并非恰好该时间送达。人工检查如暂时代替自动采集，须明确责任人、检查周期与未自动化项；缺失告警和灾备未通过状态不能被静默抹去。
 
 ## 8. 指标、告警和 Grafana
 
-[原生 Prometheus 规则](../../examples/monitoring/cnpg-pg-a.rules.yaml)是针对一个示例集群的起点，要求实例抓取任务为 `job=cnpg-postgres`，并为每个实例注入 `namespace`、`cluster`、`pod`；`cluster` 应来自 Pod 标签 `cnpg.io/cluster`。可将[抓取配置片段](../../examples/monitoring/cnpg-pg-a.scrape.yaml)合并到既有 Prometheus；它使用 Kubernetes Pod 发现、实例 `metrics` 端口及 TLS。需给予 Prometheus 对对应 Namespace Pod 的只读 list/watch 权限，并在采集端挂载经过核验的**公开 CA 证书**，不得把包含 CA 私钥的完整 Secret 授予 Prometheus。默认 CNPG 服务证书的 `server_name` 示例为 `pg-a-rw`；实际证书 SAN、CA 轮换和访问规则须验证，严禁跳过 TLS 校验。每套集群的 CA/名称可以不同，应使用不同 scrape job 并同步修改规则的 `job` 标签；不要在同一 Prometheus 配置中重复定义相同 `job_name`。
+[原生 Prometheus 规则](../examples/monitoring/cnpg-pg-a.rules.yaml)是针对一个示例集群的起点，要求实例抓取任务为 `job=cnpg-postgres`，并为每个实例注入 `namespace`、`cluster`、`pod`、`uid`；`cluster` 应来自 Pod 标签 `cnpg.io/cluster`。可将[抓取配置片段](../examples/monitoring/cnpg-pg-a.scrape.yaml)合并到既有 Prometheus；它使用 Kubernetes Pod 发现、实例 `metrics` 端口及 TLS。需给予 Prometheus 对对应 Namespace Pod 的只读 list/watch 权限，并在采集端挂载经过核验的**公开 CA 证书**，不得把包含 CA 私钥的完整 Secret 授予 Prometheus。默认 CNPG 服务证书的 `server_name` 示例为 `pg-a-rw`；实际证书 SAN、CA 轮换和访问规则须验证，严禁跳过 TLS 校验。每套集群的 CA/名称可以不同，应使用不同 scrape job 并同步修改规则的 `job` 标签；不要在同一 Prometheus 配置中重复定义相同 `job_name`。
 
 Ceph OSD 性能任务示例为 `ceph-osd`，集群状态为 `ceph-cluster`，Operator 状态来自 `kube-state-metrics`。实际任务名、标签、Prometheus/CRD 能力和权限须以平台现状替换；CNPG 默认 SQL 指标有 `cnpg_pg_replication_*`、`cnpg_pg_replication_slots_pg_wal_lsn_diff`、`cnpg_pg_stat_archiver_*`，Barman 0.15.1 指标为 `barman_cloud_cloudnative_pg_io_*`。Ceph 版本中 OSD perf 可能来自独立 `ceph-exporter`；缺少 scrape 时应告警而不是假设为 0。
 
-CNPG 1.30.1 的 `cnpg_collector_sync_replicas{value="observed"}` 从 `synchronous_standby_names` 解析**配置要求的数量**，不是当前活跃同步连接数。示例使用[自定义查询](../../examples/monitoring/cnpg-pg-a.custom-queries.yaml)统计主库 `pg_stat_replication` 中 `state=streaming` 且 `sync_state` 为 `sync`/`quorum` 的连接，导出 `cnpg_dba_sync_eligible_replicas`；该功能在参考版为 beta，查询指定 `postgres` 数据库，须确认 `cnpg_metrics_exporter` 的 `pg_monitor` 与 `CONNECT` 权限、查询开销、指标存在和失联检测延迟。该计数依赖 PostgreSQL 对连接状态的观测，不能单独证明外部 fencing 或每笔事务已持久化。
+CNPG 1.30.1 的 `cnpg_collector_sync_replicas{value="observed"}` 从 `synchronous_standby_names` 解析**配置要求的数量**，不是当前活跃同步连接数。示例使用[自定义查询](../examples/monitoring/cnpg-pg-a.custom-queries.yaml)统计主库 `pg_stat_replication` 中 `state=streaming` 且 `sync_state` 为 `sync`/`quorum` 的连接，导出 `cnpg_dba_sync_eligible_replicas`；该功能在参考版为 beta，查询指定 `postgres` 数据库，须确认 `cnpg_metrics_exporter` 的 `pg_monitor` 与 `CONNECT` 权限、查询开销、指标存在和失联检测延迟。该计数依赖 PostgreSQL 对连接状态的观测，不能单独证明外部 fencing 或每笔事务已持久化。
+
+### 8.1 Ready 数量与逐实例指标
+
+`up=0` 只覆盖仍在发现中的抓取失败；整集群 `absent_over_time` 和“没有同步备库”均不能发现所有单实例丢失。规则现在分开检查：
+
+- `dba_postgres_expected_instances` 是独立于实际 Pod/抓取数量的期望值，示例为 `3`，必须与批准的 `Cluster.spec.instances` 一致。扩缩容同一变更更新该值并检查实际 CR；有既有 CR 指标采集时可改由 spec 提供，不能从实际 Ready 数反推，不能为消除降级告警把 3 改为 2。
+- `dba_postgres_instance_info` 从 **kube-state-metrics** 的 Pod 清单选择 `cnpg.io/cluster=pg-a`、`cnpg.io/podRole=instance`，排除正在删除的 Pod，保留 `namespace/pod/uid`，不从 CNPG scrape target 反推。实例初始化 Job 不计数；同名新 UID 不继承旧实例的指标。
+- `dba_postgres_ready_instances` 以该清单关联 `kube_pod_status_ready{condition="true"}`，按 UID 去重后累计。低于期望持续 2min 为 warning；清单全部缺失会使计数保守显示 0，并触发独立的清单缺失 critical。此时 0 表示无法证实 Ready 数，不是已证明所有数据库都停机。
+- `DbaPostgresInstanceMetricsMissing` 对每个现存实例执行 `unless on(namespace,cluster,pod,uid)` 检查 `cnpg_pg_replication_in_recovery`，缺失持续 2min 为 warning。若 Pod 被删除，改由期望数对 Ready 数检测冗余不足；即使主和另一同步备库正常也须报警。
+
+平台已有 kube-state-metrics 必须允许 `pods=[cnpg.io/cluster,cnpg.io/podRole]`（合并到现有 `--metric-labels-allowlist`，不要覆盖其他条目），并采集 `kube_pod_labels`、`kube_pod_status_ready`、`kube_pod_deletion_timestamp`。KSM 会把 camelCase 标签转为小写 snake_case，`cnpg.io/podRole` 对应 `label_cnpg_io_pod_role`；Prometheus Pod 发现的元标签仍为 `__meta_kubernetes_pod_label_cnpg_io_podRole`，不能混用。核对 `label_cnpg_io_cluster` 和 `uid`；[KSM Pod 指标说明](https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/pod-metrics.md)、[标签转换实现](https://github.com/kubernetes/kube-state-metrics/blob/v2.17.0/internal/store/utils.go)。升级时重新确认。清单/Ready 缺失不能按零需求处理；KSM/API 发现故障需从独立观测路径排查，KSM 缓存也不能证明旧主已停止。CNPG 抓取配置新增 Pod UID；迁移时先核验标签与规则，一次变更完成，不能长期忽略缺失告警。
+
+### 8.2 业务写入探针契约
+
+[业务与通知证据规则](../examples/monitoring/service-evidence.rules.yaml)要求从真实业务访问域、经实际 DNS/连接池/`rw` 路径，每 30s 执行一次受限事务；使用独立最小权限探测账号及专用小表，TLS 验证服务端身份，`synchronous_commit=on`。每次生成唯一幂等标识，提交并在新连接读回标记，核对数据库身份和实际后端；只有提交确认、读回及身份检查全部通过才算成功。连接和语句设超时，整次执行初始上限 5s，失败、超时或结果不确定均记为失败并保留 unknown 对账，不能无条件重试副作用。表的清理与保留单独限额，禁止使用真实业务表。
+
+| 持续暴露的指标，固定 `namespace/cluster/probe="rw"` | 含义与规则 |
+| --- | --- |
+| `dba_postgres_write_probe_success` | 最近一次完整尝试结果，仅 0/1；失败持续 1min 为 critical |
+| `dba_postgres_write_probe_last_attempt_timestamp_seconds` | 最近一次结束的尝试时间，无论成败；停止推进 >120s 持续 30s 为 critical，防止缓存 success=1 |
+| `dba_postgres_write_probe_last_success_timestamp_seconds` | 最近通过的事务证据时间；从未成功为 0，>60s 无成功持续 30s 为 critical |
+
+任一指标缺失窗口 2min 后持续 30s 为 critical；非法成功值、NaN、负时间或超过 60s 容差的未来时间另告警。探针应按 `namespace/cluster/probe` 提供单一逻辑结果，原子更新三个值，执行失败不能保留旧 success=1；运行与采集应彼此独立。多访问域/多站点需要不同 probe 名及对应缺失规则，不能让一个探针掩盖另一个。`ha_probe.py` 仍只用于隔离测试事务对账，**不是生产持续探针或常连接双写检测器**；生产探测及证据采集需接入平台现有设施并按本契约验收。
+
+### 8.3 通知送达与监控自身
+
+同一规则文件补齐 Prometheus 未发现 Alertmanager/发送错误/自指标缺失，以及 Alertmanager 渠道发送失败、配置重载失败、自指标缺失规则。任务名示例为 `prometheus` 和 `alertmanager`，需自抓取并在交接时按实际名称修改。失败计数以 5min 窗口、持续 1min 为起点；路由、重复间隔与 `for` 均计入真正通知时延。指标来源核对[Prometheus notifier](https://github.com/prometheus/prometheus/blob/main/notifier/metric.go)及[Alertmanager notify](https://github.com/prometheus/alertmanager/blob/main/notify/metrics.go)，现场版本须再检查。
+
+`DbaNotificationWatchdog` 持续 firing，必须经**实际值班接收渠道**发送。合并以下子路由到现有 Alertmanager `route.routes` 的适当优先位置；`dba-oncall` 应是现有、已配置的真实接收方，不是空接收器。其余告警按既有 critical/warning 路由，配置恢复通知、重复发送及未确认升级；心跳不应被通用 severity 过滤、抑制或维护静默屏蔽：
+
+```yaml
+- matchers:
+    - alertname="DbaNotificationWatchdog"
+    - dba_cluster="pg-a"
+  receiver: dba-oncall
+  group_by: [alertname, dba_cluster]
+  group_wait: 0s
+  group_interval: 1m
+  repeat_interval: 1m
+```
+
+最终接收端确认实际送达后，才更新 `dba_alert_notification_last_received_timestamp_seconds{namespace="dba-a",cluster="pg-a",receiver="dba-oncall"}`。保持每次回执的真实 Unix 秒并持续暴露；不能由 Prometheus 求值、Alertmanager 接受告警或中转 webhook 返回 200 刷新。超过 300s 未送达持续 1min、缺失窗口 5min 后持续 1min、零/负/NaN/超容差未来时间持续 1min 均有 critical 规则。无法取得最终送达回执时只能声明已验证的中间链路，保留人工终端收件核验与未自动化项，不能伪造送达指标。
+
+最终接收端还必须在生产监控栈之外检查“每分钟心跳是否到达”，超时走**独立备用渠道**；不能只靠失效的 Alertmanager 给自己报警。每次验收保存：规则 pending/firing、Prometheus 到 Alertmanager、有效路由/静默/抑制、渠道送达 ID、值班终端实际收件时间、人员确认和升级、故障恢复通知。终端收到和人员确认分别记录；心跳送达不代替真实 critical/warning 及恢复消息的路由测试。
 
 | 级别 | 初始触发与处置 |
 | --- | --- |
-| critical | 观测主数量非 1、实例指标全部缺失、无同步副本、持续归档失败、PVC 空闲 <10%、基础备份超 26h 或未产生、备份指标缺失、OSD down、Operator 0 副本；立刻核对真实写入、复制与故障域，暂停危险变更并保留证据 |
-| warning | 备库回放 >30s/5min、WAL 接收器中断 5min、槽差 >3 GiB/5min、归档队列 ≥4 段/10min、PVC 空闲 <20%、OSD 平均写延迟 >50ms/5min、Operator 少于 2 副本；按对应 WAL/存储/复制手册处置 |
-| 缺失及预测 | 写入探针每 30 秒尝试一次，连续失败 1 分钟或数据缺失 2 分钟为 critical；PVC 指标缺失或可用空间预测 <4h 需告警；若目标独立恢复点落后 >15 分钟或观测缺失 >15 分钟为 critical；按月 PITR 超 31 天、按季度跨站恢复超 100 天为 warning。上述周期和阈值仅为示例，必须配置真实采集与通知，示例规则不伪造这些数据 |
+| critical | 主数量非 1、实例/清单指标全缺、无同步备、业务写探针失败/停更/缺失、无效证据、归档失败、PVC <10%、基础备份超 26h/缺失、恢复点落后、OSD down、Operator 0 副本、通知链路失败或回执过期；核对真实写入和保护状态，暂停危险变更 |
+| warning | Ready 少于期望/逐实例指标缺失持续 2min、备库回放 >30s/5min、接收器中断、槽积压、归档队列、PVC <20%/容量预测、Ceph 延迟、Operator 少于两副本、PITR/跨站演练逾期；按对应手册处置 |
 
-这些阈值依赖示例 4GB 槽限制、每日备份和现有故障域，不构成通用 SLA。`cnpg_collector_pg_wal{value="size"}` 是 WAL 目录估算大小，`kubelet_volume_stats_*` 是 PVC 水位；如果 CSI/kubelet 不提供 PVC 指标，要用已验证的节点或应用文件系统监控并为指标缺失告警。`up=0` 不能检测已消失的 scrape target，故规则另设针对该集群的 `absent_over_time`；无故障采集和实际客户端事务探测缺一不可。
+阈值依赖示例 4GB 槽限制、每日备份和业务故障域，不构成通用 SLA。`cnpg_collector_pg_wal{value="size"}` 是 WAL 目录估算大小，`kubelet_volume_stats_*` 是 PVC 水位；CSI/kubelet 不提供时应接入已验证的文件系统监控并保留缺失告警。所有 `dba_*` 采集、通知路由和独立心跳均为交付前置项；仅加载规则或离线测试通过不代表已经实现采集、通知或恢复。
 
 Grafana 优先复用平台已有数据源与权限，按 `namespace/cluster/pod` 展示主备、同步状态、复制时延/字节、槽距离、归档队列、PVC/WAL、备份时间、Ceph OSD 读写与恢复流量、Operator 可用副本；同屏叠加客户端提交延迟及维护事件。故障诊断时先从真实写探测和数据保护信号开始，再定位控制面、网络、存储或备份；告警的阈值、owner、通知路由和恢复条件须在演练中验证。
 
@@ -184,6 +245,6 @@ patches:
         value: pg-b-monitoring
 ```
 
-不能只改 Cluster：第二套还必须分别覆盖 ObjectStore 名、唯一 S3 前缀/身份、ScheduledBackup 的 `cluster.name` 和时间、[Quota/LimitRange](../../examples/namespace/pg-a-quota.yaml)、[NetworkPolicy](../../examples/network/pg-a-networkpolicy.yaml)、[监控查询 ConfigMap](../../examples/monitoring/cnpg-pg-a.custom-queries.yaml)中的名称/Namespace，以及[告警规则](../../examples/monitoring/cnpg-pg-a.rules.yaml)和[恢复证据规则](../../examples/monitoring/recovery-evidence.rules.yaml)中的 Namespace、集群、站点、阈值和任务标签。第二套三个 50 GiB PVC 至少申请 150 GiB，第一套的 100 GiB `requests.storage` 示例会阻止创建，必须连同重建及恢复余量重新设定；第二套 slot 预算为 8GB 时，示例 3 GiB 告警也不应原样复制。告警与容量交接一起调整，变更前逐项对照渲染结果、资源引用和目标身份，不要批量替换证据或凭据。
+不能只改 Cluster：第二套还必须分别覆盖 ObjectStore 名、唯一 S3 前缀/身份、ScheduledBackup 的 `cluster.name` 和时间、[Quota/LimitRange](../examples/namespace/pg-a-quota.yaml)、[NetworkPolicy](../examples/network/pg-a-networkpolicy.yaml)、[监控查询 ConfigMap](../examples/monitoring/cnpg-pg-a.custom-queries.yaml)中的名称/Namespace，以及[告警规则](../examples/monitoring/cnpg-pg-a.rules.yaml)、[恢复证据规则](../examples/monitoring/recovery-evidence.rules.yaml)和[业务/通知证据规则](../examples/monitoring/service-evidence.rules.yaml)中的 Namespace、集群、站点、阈值和任务标签。第二套三个 50 GiB PVC 至少申请 150 GiB，第一套的 100 GiB `requests.storage` 示例会阻止创建，必须连同重建及恢复余量重新设定；第二套 slot 预算为 8GB 时，示例 3 GiB 告警也不应原样复制。告警与容量交接一起调整，变更前逐项对照渲染结果、资源引用和目标身份，不要批量替换证据或凭据。
 
 建议顺序：①交接版本、故障域、容量、独立对象存储和隔离方案；②审核并接入 Operator/CSI、网络和监控；③先建立一套测试集群，完成真实复制、ACK、PITR、Ceph 和告警验收；④按同一模板逐套覆盖并错开备份/维护；⑤执行[验收手册](acceptance.md)并登记未验证项。未通过任何关键保护项的集群不迁入生产写流量。
